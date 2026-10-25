@@ -112,6 +112,79 @@
     "description": "客户端船名文件路径（可选）",
     "type": "string",
     "default": "",
-    "hint": "留空为 AstrBot 的 data/wows_ship/names/zh_sg.json；文件不存在时使用 WG API 的船名。"
+    "hint": "留空使用插件内置的客户端船名表（可在“随机选船”里开启自动下载）。也可以填 zhenxun 版 wows_ship 导出的 zh_sg.json，或游戏客户端的 global.mo；这里的名称优先级最高。"
+  },
+  "ship_picker": {
+    "description": "随机选船（这把玩什么船）",
+    "type": "object",
+    "hint": "/这把玩什么船（/选船）从持有清单、玩过的船或全库里随机抽一艘。船库由 WG API 自动同步，和战绩查询共用 application_id 与绑定。",
+    "items": {
+      "enabled": {
+        "description": "启用随机选船",
+        "type": "bool",
+        "default": true
+      },
+      "cooldown_seconds": {
+        "description": "每人冷却（秒）",
+        "type": "int",
+        "default": 5,
+        "hint": "同一个人两次选船之间的最短间隔，0 = 不限制。"
+      },
+      "tier_min": {
+        "description": "默认最低等级",
+        "type": "int",
+        "default": 5,
+        "hint": "没写等级时的抽取范围（1～11）；写“超级战舰”时不受这个范围限制。"
+      },
+      "tier_max": {
+        "description": "默认最高等级",
+        "type": "int",
+        "default": 10
+      },
+      "default_pool": {
+        "description": "默认抽取范围",
+        "type": "string",
+        "default": "auto",
+        "options": [
+          "auto",
+          "catalog"
+        ],
+        "labels": [
+          "我的优先（持有清单 > 玩过的船 > 全库）",
+          "总是全库"
+        ],
+        "hint": "用户写了“我的”或“全库”时以用户为准。"
+      },
+      "image_style": {
+        "description": "舰图样式",
+        "type": "string",
+        "default": "large",
+        "options": [
+          "large",
+          "small",
+          "contour",
+          "none"
+        ],
+        "labels": [
+          "彩色大图",
+          "彩色小图（更省流量）",
+          "白色轮廓图",
+          "不显示舰图"
+        ],
+        "hint": "舰图第一次用到时从 WG 官方 CDN 下载并缓存到插件数据目录。"
+      },
+      "auto_update": {
+        "description": "自动更新船库",
+        "type": "bool",
+        "default": true,
+        "hint": "每 6 小时检查一次游戏版本，版本变化或超过 7 天时重新同步船库。关闭后只在船库为空时同步，可用 /wows 船库更新 手动更新。"
+      },
+      "names_auto_download": {
+        "description": "自动下载最新客户端船名",
+        "type": "bool",
+        "default": false,
+        "hint": "默认使用插件内置的船名表（随插件版本更新）。开启后每天从第三方 GitHub 仓库 landaire/wows-replay-data 检查一次，新版本时下载中文和英文语言文件（约 11 MB，会校验哈希），让新船尽快显示客户端名称。访问 GitHub 会使用系统代理设置（HTTPS_PROXY）。"
+      }
+    }
   }
 }

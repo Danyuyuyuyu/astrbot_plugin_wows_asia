@@ -4,6 +4,7 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -39,6 +40,11 @@ SHIP_FIELDS = ",".join(("ship_id",) + tuple(f"{m}.{f}" for m in ("pvp", "rank_so
 # pvp_solo/div2/div3: battle counts are diffed to tell solo vs. division for each random battle (the tracker
 # keeps battles only); wins feed the 单船 card's team breakdown.
 SHIP_EXTRA = "rank_solo,pvp_solo,pvp_div2,pvp_div3"
+CATALOG_FIELDS = ("ship_id,ship_id_str,name,tier,nation,type,is_premium,is_special,"
+                  "images.small,images.medium,images.large,images.contour")
+IMAGE_HOSTS = frozenset({"wows-gloss-icons.wgcdn.co"})
+IMAGE_TYPES = frozenset({"image/png", "image/jpeg", "image/webp"})
+MAX_IMAGE_BYTES = 4 * 1024 * 1024
 
 
 class ApiRejected(WowsError):
@@ -116,6 +122,15 @@ class WowsApi:
             self._next_at = time.monotonic() + self.min_interval
 
     async def request(self, path: str, **params: Any) -> Any:
+        return (await self._call(path, params))["data"]
+
+    async def request_page(self, path: str, **params: Any) -> tuple[Any, dict]:
+        """Like request, plus the response's ``meta`` (page_total etc.) for paged endpoints."""
+        payload = await self._call(path, params)
+        meta = payload.get("meta")
+        return payload["data"], meta if isinstance(meta, dict) else {}
+
+    async def _call(self, path: str, params: dict[str, Any]) -> dict:
         if not self.configured:
             raise WowsError(f"尚未配置 WG API：{HINTS['app_id']}。")
         await self._wait_turn()
@@ -154,7 +169,7 @@ class WowsApi:
             )
         if "data" not in payload:
             raise WowsError("WG API 返回缺少 data，请稍后再试。")
-        return payload["data"]
+        return payload
 
     async def _request_extra(self, path: str, extra: str, **params: Any) -> Any:
         """Ask with optional `extra`; if WG rejects the extra parameter, retry without it."""
@@ -306,3 +321,45 @@ class WowsApi:
             if entry and entry[1] is not None:
                 out[sid] = entry[1]
         return out
+
+    # ---- ship catalog (随机选船) ----
+    async def game_version(self) -> str | None:
+        data = await self.request("encyclopedia/info/", fields="game_version")
+        version = data.get("game_version") if isinstance(data, dict) else None
+        return str(version) if version else None
+
+    async def catalog_page(self, page_no: int) -> tuple[dict, int]:
+        """One page (up to 100 ships) of encyclopedia/ships with the fields the ship picker needs."""
+        data, meta = await self.request_page("encyclopedia/ships/", page_no=page_no, limit=100,
+                                             fields=CATALOG_FIELDS)
+        try:
+            pages = int(meta.get("page_total") or 1)
+        except (TypeError, ValueError):
+            pages = 1
+        if not isinstance(data, dict):
+            raise WowsError("WG API 返回的舰船目录格式异常。")
+        return data, max(pages, 1)
+
+    async def fetch_image(self, url: str) -> bytes:
+        """Download a ship image from the official WG CDN only (size and type checked)."""
+        parts = urlsplit(url)
+        if parts.scheme != "https" or parts.hostname not in IMAGE_HOSTS or parts.port not in (None, 443) \
+                or parts.username or parts.password:
+            raise WowsError("舰图地址不是官方 CDN。")
+        try:
+            async with self._http().stream("GET", url) as response:
+                if response.status_code != 200:
+                    raise WowsError(f"舰图下载失败（HTTP {response.status_code}）。")
+                kind = response.headers.get("content-type", "").split(";")[0].strip()
+                if kind not in IMAGE_TYPES:
+                    raise WowsError("舰图响应类型无效。")
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    body.extend(chunk)
+                    if len(body) > MAX_IMAGE_BYTES:
+                        raise WowsError("舰图过大。")
+        except httpx.TimeoutException:
+            raise WowsError("舰图下载超时。") from None
+        except httpx.HTTPError:
+            raise WowsError("舰图下载失败，请检查网络。") from None
+        return bytes(body)

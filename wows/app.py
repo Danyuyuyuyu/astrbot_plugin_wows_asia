@@ -1,52 +1,21 @@
 """Command orchestration, independent from AstrBot so it can be tested directly."""
 import time
-from dataclasses import dataclass, field
-from typing import Union
 
 from . import cards, formatting, views
 from .api import WowsApi
+from .outcome import Card, Outcome, Reply  # noqa: F401  (re-exported)
 from .commands import Command, Query, WowsError, help_text, parse_command
 from .renderer import CardRenderer
 from .stats import num
 from .storage import Storage
 from .tracker import Tracker
 
-# bytes = rendered card; (bytes, caption) = card plus a one-glance text line for AI callers
-Reply = Union[str, bytes, tuple[bytes, str]]
-
-
-@dataclass
-class Card:
-    html: str
-    text: str
-    caption: str = ""  # the card's numbers as text, handed to the LLM
-    status: str = "ok"
-    options: list[str] = field(default_factory=list)
-
-
-@dataclass
-class Outcome:
-    """What a query produced, with a status the LLM tool can act on.
-
-    status: ok | help | not_bound | mention_not_bound | candidates | not_found | error | bound | unbound
-    | hidden | newbie | quota | tracking | idle | nomatch | noship
-    """
-    status: str
-    text: str = ""  # text reply, or the card's text version
-    image: bytes | None = None
-    caption: str = ""
-    options: list[str] = field(default_factory=list)  # nickname candidates / ship names to retry with
-
-    def reply(self, ai: bool = False) -> "Reply":
-        if self.image is None:
-            return self.text
-        return (self.image, self.caption) if ai and self.caption else self.image
-
 
 class WowsApp:
     def __init__(self, api: WowsApi, storage: Storage, renderer: CardRenderer | None, *,
                  tracker: Tracker, cache_seconds: int = 60, min_battles: int = 50, poll_minutes: int = 10,
-                 clock=time.time, logger=None):
+                 clock=time.time, logger=None, picker=None):
+        self.picker = picker  # picker.service.Picker, or None when the ship picker is not set up
         self.api = api
         self.storage = storage
         self.renderer = renderer
@@ -62,18 +31,22 @@ class WowsApp:
         return int(self.clock())
 
     async def handle(self, user_key: str | None, raw: str, *, mentions: list[str] | None = None,
-                     ai: bool = False) -> Reply:
+                     ai: bool = False, requester: str = "", is_admin: bool = False) -> Reply:
         """mentions: user keys of @-ed users (query their bound account); ai: also return the card's text."""
         try:
             cmd = parse_command(raw)
         except WowsError as exc:
             return str(exc)
-        return (await self.execute(user_key, cmd, mentions=mentions)).reply(ai)
+        return (await self.execute(user_key, cmd, mentions=mentions, requester=requester,
+                                   is_admin=is_admin)).reply(ai)
 
-    async def execute(self, user_key: str | None, cmd: Command, *, mentions: list[str] | None = None) -> Outcome:
+    async def execute(self, user_key: str | None, cmd: Command, *, mentions: list[str] | None = None,
+                      requester: str = "", is_admin: bool = False) -> Outcome:
         try:
             if cmd.action == "help":
                 return Outcome("help", help_text())
+            if cmd.action in ("pick", "owned", "catalog"):
+                return await self._picker(user_key, cmd, requester, is_admin)
             if cmd.action == "unbind":
                 return self._unbind(user_key)
             if cmd.action == "bind":
@@ -101,6 +74,17 @@ class WowsApp:
             if self.logger:
                 self.logger.error(f"WoWS command failed unexpectedly: {type(exc).__name__}")
             return Outcome("error", "战绩查询遇到内部错误，请联系管理员检查插件环境。")
+
+    async def _picker(self, user_key: str | None, cmd: Command, requester: str, is_admin: bool) -> Outcome:
+        if self.picker is None or not self.picker.settings.enabled:
+            return Outcome("disabled", "随机选船功能没有开启。")
+        if cmd.action == "pick":
+            return await self.picker.pick(user_key, cmd.text, requester)
+        if cmd.action == "owned":
+            return await self.picker.owned(user_key, cmd.text)
+        if cmd.text != "状态" and not is_admin:
+            return Outcome("forbidden", "船库更新 / 船库校验 只有管理员可以使用。")
+        return await self.picker.admin(cmd.text)
 
     async def _output(self, card: Card) -> Outcome:
         out = Outcome(card.status, card.text, caption=card.caption or card.text, options=list(card.options))

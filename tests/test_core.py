@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from wows import cards, views
-from wows.api import ACCOUNT_FIELDS, ApiRejected, WowsApi
+from wows.api import ACCOUNT_FIELDS, WowsApi
 from wows.app import WowsApp
 from wows.commands import Command, Query, WowsError, parse_command, parse_query
 from wows.renderer import CardRenderer

@@ -90,6 +90,29 @@ class Storage:
             self._db.execute(sql, args)
             self._db.commit()
 
+    # ---- shared access for other modules (the ship picker keeps its tables in this database) ----
+    def query(self, sql: str, args=()) -> list:
+        return self._all(sql, args)
+
+    def execute(self, sql: str, args=()) -> None:
+        self._run(sql, args)
+
+    def script(self, sql: str) -> None:
+        with self._lock:
+            self._db.executescript(sql)
+            self._db.commit()
+
+    def transaction(self, work):
+        """Run ``work(connection)`` atomically: committed when it returns, rolled back when it raises."""
+        with self._lock:
+            try:
+                result = work(self._db)
+            except BaseException:
+                self._db.rollback()
+                raise
+            self._db.commit()
+            return result
+
     # ---- bindings ----
     def bind(self, user_key: str, account_id: int, nickname: str, now: int) -> None:
         self._run("INSERT INTO binding VALUES (?,?,?,?) ON CONFLICT(user_key) DO UPDATE SET "

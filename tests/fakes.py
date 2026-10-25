@@ -51,6 +51,30 @@ def ships():
     ]
 
 
+IMG = "https://wows-gloss-icons.wgcdn.co/icons/vehicle/{}/{}.png"
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\0" * 32
+
+
+def _ship(sid, code, name, tier, nation, kind, premium=False, special=False):
+    return {"ship_id": sid, "ship_id_str": code, "name": name, "tier": tier, "nation": nation, "type": kind,
+            "is_premium": premium, "is_special": special,
+            "images": {k: IMG.format(k, code) for k in ("small", "medium", "large", "contour")}}
+
+
+CATALOG = {str(s["ship_id"]): s for s in (
+    _ship(1, "PJSB018", "Yamato", 10, "japan", "Battleship"),
+    _ship(2, "PASC020", "Des Moines", 10, "usa", "Cruiser"),
+    _ship(3, "PJSD012", "Shimakaze", 10, "japan", "Destroyer"),
+    _ship(4, "PWSD110", "Halland", 10, "europe", "Destroyer"),
+    _ship(5, "PJSB509", "Musashi", 9, "japan", "Battleship", premium=True),
+    _ship(6, "PASB509", "Missouri", 9, "usa", "Battleship", premium=True),
+    _ship(7, "PASD210", "Somers", 10, "usa", "Destroyer", special=True),
+    _ship(8, "PJSB111", "Satsuma", 11, "japan", "Battleship"),
+    _ship(9, "PJSB700", "Mikasa", 2, "japan", "Battleship", premium=True),
+    _ship(10, "PJSA020", "Hakuryu", 10, "japan", "AirCarrier"),
+)}
+
+
 class FakeWG:
     def __init__(self):
         self.account = account()
@@ -62,6 +86,9 @@ class FakeWG:
         self.ladder = {"league": 4, "division": 3, "battles_count": 12, "season_number": 35, "color": "#b3b3b3"}
         self.clan_color = "#cc9966"
         self.ladder_status = 200
+        self.catalog = copy.deepcopy(CATALOG)
+        self.game_version = "15.9.0"
+        self.image_status = 200
 
     def handler(self, request: httpx.Request):
         if request.url.host == "clans.worldofwarships.asia":
@@ -72,6 +99,11 @@ class FakeWG:
                 return httpx.Response(self.ladder_status)
             return httpx.Response(200, json={"clanview": {"clan": {"tag": self.clan, "color": self.clan_color},
                                                            "wows_ladder": self.ladder}})
+        if request.url.host == "wows-gloss-icons.wgcdn.co":
+            self.calls.append(("image", str(request.url)))
+            if self.image_status != 200:
+                return httpx.Response(self.image_status)
+            return httpx.Response(200, content=PNG_BYTES, headers={"content-type": "image/png"})
         path = request.url.path.split("/wows/", 1)[1]
         params = dict(request.url.params)
         self.calls.append((path, params))
@@ -88,6 +120,16 @@ class FakeWG:
             if self.account.get("hidden_profile"):
                 return ok({str(AID): None})
             return ok({str(AID): copy.deepcopy(self.ships)})
+        if path == "encyclopedia/ships/" and "ship_id" not in params:
+            limit, page = int(params.get("limit", 100)), int(params.get("page_no", 1))
+            keys = sorted(self.catalog, key=int)
+            total = max((len(keys) + limit - 1) // limit, 1)
+            chunk = {k: copy.deepcopy(self.catalog[k]) for k in keys[(page - 1) * limit:page * limit]}
+            return httpx.Response(200, json={"status": "ok", "meta": {"page_total": total, "page": page,
+                                                                       "count": len(chunk), "total": len(keys)},
+                                             "data": chunk})
+        if path == "encyclopedia/info/":
+            return ok({"game_version": self.game_version})
         if path == "encyclopedia/ships/":
             return ok({i: SHIPS_INFO.get(int(i)) for i in params["ship_id"].split(",")})
         if path == "clans/accountinfo/":

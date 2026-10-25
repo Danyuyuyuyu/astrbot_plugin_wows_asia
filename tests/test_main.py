@@ -1,7 +1,6 @@
 """AstrBot entry point: loaded the way AstrBot loads plugins (<plugin dir>.main), driven with real event types."""
 import importlib
 import json
-import re
 from pathlib import Path
 
 import pytest
@@ -71,7 +70,7 @@ async def collect(gen):
 def test_hints_and_help_use_astrbot_wording():
     help_text = commands.help_text()
     assert "唤醒词" in help_text and "COMMAND_START" not in help_text
-    assert "插件 → WoWS 亚服战绩 的配置" in main.HINTS["app_id"] and ".env" not in main.HINTS["app_id"]
+    assert "插件 → WoWS 亚服战绩与选船 的配置" in main.HINTS["app_id"] and ".env" not in main.HINTS["app_id"]
 
 
 def test_args_and_mentions():
@@ -216,3 +215,46 @@ def test_schema_converts_for_providers():
     assert tools.anthropic_schema()[0]["input_schema"]["required"] == ["action"]
     gemini = json.dumps(tools.google_schema(), ensure_ascii=False)
     assert "单船" in gemini and "nth" in gemini
+
+
+def test_picker_settings_from_config():
+    s = main._picker_settings({"ship_picker": {"enabled": False, "cooldown_seconds": -5, "tier_min": 9,
+                                               "tier_max": 6, "default_pool": "catalog", "image_style": "???",
+                                               "names_auto_download": True}})
+    assert (s.enabled, s.cooldown, s.tier_min, s.tier_max) == (False, 0, 6, 9)
+    assert s.default_pool == "catalog" and s.image_style == "large" and s.names_download is True
+    assert main._picker_settings({}).enabled is True
+
+
+async def test_pick_command_and_wows_subcommand(tmp_path):
+    plugin, fake = make_plugin()
+    picker_mod = importlib.import_module(f"{ROOT.name}.wows.picker.service")
+    names_mod = importlib.import_module(f"{ROOT.name}.wows.ship_names")
+    plugin.picker = picker_mod.Picker(plugin.api, plugin.storage, StaticRenderer(), data_dir=tmp_path,
+                                      names=names_mod.ShipNameMap(),
+                                      settings=picker_mod.PickerSettings(cooldown=0))
+    plugin.app.picker = plugin.picker
+    try:
+        assert plugin._args("选船 日本 战列", None, main.PICK_COMMANDS) == "日本 战列"
+        assert plugin._args("/这把玩什么船", None, main.PICK_COMMANDS) == ""
+        out = await collect(plugin.pick_ship(Event("选船 日本 战列 10")))
+        assert isinstance(out[0].chain[0], Comp.Image)
+        out = await collect(plugin.pick_ship(Event("选船 乱写")))
+        assert "看不懂" in out[0].get_plain_text()
+        out = await collect(plugin.wows(Event("wows 船库更新")))
+        assert "只有管理员" in out[0].get_plain_text()
+        admin = Event("wows 船库更新")
+        admin.role = "admin"
+        out = await collect(plugin.wows(admin))
+        assert "船库已同步" in out[0].get_plain_text()
+        out = await collect(plugin.wows(Event("wows 持有", sender="10099")))
+        assert "先发 /wows 绑定" in out[0].get_plain_text()
+    finally:
+        await plugin.terminate()
+
+
+def test_pick_command_registered():
+    from astrbot.core.star.star_handler import star_handlers_registry
+
+    names = {h.handler_name for h in star_handlers_registry}
+    assert "pick_ship" in names and "wows" in names

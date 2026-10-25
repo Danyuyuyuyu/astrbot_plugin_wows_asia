@@ -1,8 +1,8 @@
 # astrbot_plugin_wows_asia
 
-[AstrBot](https://github.com/AstrBotDevs/AstrBot) 战舰世界（WoWS）**亚服**战绩查询插件：图片战绩卡、单船战绩、最近战绩（逐场记录）、账号绑定，并提供给大模型调用的函数工具。
+[AstrBot](https://github.com/AstrBotDevs/AstrBot) 战舰世界（WoWS）**亚服**战绩查询与随机选船插件：图片战绩卡、单船战绩、最近战绩（逐场记录）、账号绑定、“这把玩什么船”随机选船，并提供给大模型调用的函数工具。
 
-由 [nonebot-plugin-wows-asia](https://github.com/Danyuyuyuyu/nonebot-plugin-wows-asia) 移植而来，现在独立维护：大模型调用改成了结构化参数，不再和 NoneBot 版同步。
+由 [nonebot-plugin-wows-asia](https://github.com/Danyuyuyuyu/nonebot-plugin-wows-asia) 移植而来，现在独立维护：大模型调用改成了结构化参数，不再和 NoneBot 版同步。0.3.0 起并入了 zhenxun 版 [wows_ship](https://github.com/Danyuyuyuyu/wows_ship) 的随机选船功能，两者共用 application_id、账号绑定、数据库和截图浏览器。
 
 - 只使用 WG 公开 API（`https://api.worldofwarships.asia/wows/`），只需要 `application_id`，不需要玩家密码或 OAuth。
 - 卡片为本地 HTML 模板 + 无头 Chromium 截图，不加载外部网络资源；渲染失败时自动降级为文字。
@@ -45,9 +45,21 @@
 | `max_tracked` | `200` | 最多同时记录的账号数（绑定账号不受限） |
 | `record_days` | `30` | 逐场记录保留天数（≥15） |
 | `min_battles` | `50` | 随机场次低于此值显示新号状态卡 |
-| `ship_names_path` | 空 | 可选，客户端船名文件（`zh_sg.json`）路径，用来显示与游戏客户端一致的船名；默认 `data/wows_ship/names/zh_sg.json`，不存在时使用 API 船名 |
+| `ship_names_path` | 空 | 可选，自定义客户端船名文件：本插件格式的 JSON、zhenxun 版 wows_ship 导出的 `zh_sg.json`，或游戏客户端的 `global.mo`。优先级最高；留空时使用内置船名表（见下） |
 
-数据（绑定、快照、记录）保存在 `data/plugin_data/astrbot_plugin_wows_asia/wows_asia.sqlite3`，更新或重装插件不会丢失。
+**随机选船**（配置里的“随机选船”分组 `ship_picker`）：
+
+| 配置项 | 默认 | 说明 |
+| --- | --- | --- |
+| `enabled` | 开 | 启用随机选船 |
+| `cooldown_seconds` | `5` | 同一个人两次选船的最短间隔（秒），0 = 不限制 |
+| `tier_min` / `tier_max` | `5` / `10` | 没写等级时的抽取范围；写“超级战舰”时不受限制 |
+| `default_pool` | `auto` | `auto` 我的优先（持有清单 > 玩过的船 > 全库）/ `catalog` 总是全库 |
+| `image_style` | `large` | 舰图：`large` 彩色大图 / `small` 彩色小图 / `contour` 白色轮廓 / `none` 不显示 |
+| `auto_update` | 开 | 每 6 小时检查游戏版本，版本变化或超过 7 天时重新同步船库；关闭后只在船库为空时同步 |
+| `names_auto_download` | 关 | 每天从第三方仓库 [landaire/wows-replay-data](https://github.com/landaire/wows-replay-data) 检查一次新版本客户端船名（见“船名来源”） |
+
+数据（绑定、快照、记录、船库、持有清单）保存在 `data/plugin_data/astrbot_plugin_wows_asia/wows_asia.sqlite3`，舰图缓存在同目录的 `ship_images/`，更新或重装插件不会丢失。
 
 ## 指令
 
@@ -84,6 +96,47 @@
 例：`/wows 场次 张三 今天下午 船=伊吹`、`/wows 单场 今天 按伤害`、`/wows 场次 昨天 船=大和`、`/wows 场次 @张三 近3天 排位`、`/wows 场次 近3天 最差5把`、`/wows 单场 今天 伤害最低`。
 
 别名 `/窝窝战绩`。昵称精确匹配失败时最多返回 5 个候选，不会擅自使用第一个候选。
+
+## 随机选船（这把玩什么船）
+
+| 指令 | 说明 |
+| --- | --- |
+| `/这把玩什么船 [条件]`（别名 `/选船`、`/随机船`，也可 `/wows 选船 [条件]`） | 按条件随机抽一艘船，发选船卡片 |
+| `/wows 持有` | 查看自己的持有清单 |
+| `/wows 持有 添加 船名…` / `删除 船名…` / `设置 船名…` | 修改持有清单（`设置` = 整体替换）；船名用空格或逗号分隔，支持客户端名、API 名、英文名，错字和同音字会自动纠正 |
+| `/wows 持有 导入` | 用玩过的船生成持有清单（之后可以再删掉卖掉的船） |
+| `/wows 持有 清空` / `关闭` | 清空清单 / 关闭清单（改回从玩过的船里抽） |
+| `/wows 船库状态` | 船库艘数、游戏版本、船名来源、舰图缓存 |
+| `/wows 船库更新`（管理员） | 立即重新同步船库（开启自动下载时也会检查船名） |
+| `/wows 船库校验`（管理员） | 删除损坏的舰图缓存，并在后台补全所有舰图（全部约 100–200 MB；不校验时只缓存抽到过的船） |
+
+**条件**（空格分隔、顺序随意；同类写多个表示“任一”）：
+
+| 类别 | 写法 |
+| --- | --- |
+| 范围 | `我的`（持有清单，没有清单时用玩过的船）/ `持有` / `玩过` / `全库` |
+| 国家 | `日本` `美国` `德国` `苏联` `英国` `法国` `意大利` `泛亚` `欧洲` `泛美` `荷兰` `西班牙` `英联邦` |
+| 舰种 | `驱逐` `巡洋` `战列` `航母` `潜艇`（也可写 DD / CA / BB / CV / SS） |
+| 分类 | `研发`（银币）`金币` `特种` `超级战舰`。X 级官方数据没有金币船标记，X 级的“金币”包含特种船 |
+| 等级 | `8` `VIII` `8级` `8-10` `8级以上` `6级以下`；不写时默认 V–X 级 |
+| 排除 | `不要金币` `非航母` `-潜艇` `不要 日本` |
+| 数量 | `3艘` `x3`（一次最多 5 艘，不重复） |
+
+例：`/选船 日本 战列 8-10`、`/选船 全库 不要航母 x3`、`/这把玩什么船 我的 金币`。
+
+- **抽取范围**：不写时，已绑定（`/wows 绑定 昵称`，和战绩查询是同一个绑定）的人优先从持有清单抽，没有清单时从玩过的船抽（战绩隐藏或没有记录时自动改从全库抽，卡片上会注明）；没绑定的人从全库抽。持有清单跟着 WG 账号走，绑定同一个账号的人共用一份。
+- **船库**：插件启动后自动从 WG API `encyclopedia/ships` 同步全部舰船（约 10 次请求），之后按“自动更新船库”的设置刷新；WG 返回的数据明显不完整时不会覆盖本地船库。下架的船不再参与随机。
+- **舰图**：第一次抽到某艘船时从 WG 官方 CDN（`wows-gloss-icons.wgcdn.co`）下载并缓存，卡片截图时仍然屏蔽所有网络请求；下载失败时依次尝试其它尺寸和轮廓图，再不行就不显示舰图。输出方式为纯文字时不下载舰图。
+
+### 船名来源
+
+卡片上优先显示与游戏客户端一致的船名，按以下顺序合并（后面的覆盖前面的），都没有时使用 WG API 的船名：
+
+1. **内置船名表** `wows/picker/assets/ship_names.json`：从游戏客户端语言文件提取的中文（zh_sg）和英文船名，随插件版本更新（维护者用 `python scripts/build_ship_names.py` 刷新）。
+2. **自动下载**（`names_auto_download`，默认关）：每天检查一次第三方仓库 landaire/wows-replay-data，有新版本时下载中文和英文 `global.mo`（约 11 MB，按内容哈希校验），保存为数据目录下的 `ship_names.json`。新船上线后不用等插件更新就能显示客户端名称。访问 GitHub 时使用系统代理设置（`HTTPS_PROXY`），WG API 仍然直连。
+3. **自定义文件**（`ship_names_path`）。
+
+船名同样用于战绩卡片和函数工具的船名识别。
 
 ## 大模型函数调用
 
@@ -165,7 +218,7 @@ pip install -r requirements.txt
 pytest
 ```
 
-`wows/` 是不依赖 AstrBot 的核心（查询、记录、卡片、函数工具参数解析），`main.py` 负责接入 AstrBot。
+`wows/` 是不依赖 AstrBot 的核心（查询、记录、卡片、函数工具参数解析），`wows/picker/` 是随机选船（参数解析、随机、船库同步、持有清单、舰图缓存、选船卡片），`main.py` 负责接入 AstrBot。没有安装 AstrBot 时入口测试会自动跳过。代码风格检查：`ruff check .`。
 
 ## 许可
 

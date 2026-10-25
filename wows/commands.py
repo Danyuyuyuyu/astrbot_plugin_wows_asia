@@ -22,6 +22,12 @@ HELP = """WoWS 亚服战绩查询
 　例：/wows 单场 今天 按伤害　/wows 场次 昨天 船=大和　/wows 场次 最差5把
 　　　/wows 单船 大和　/wows 战舰 伊吹 张三
 /wows 解绑　　　　取消绑定
+随机选船：/这把玩什么船 [条件]（也可 /选船、/wows 选船）
+　条件：我的 / 全库　日本 美国…　驱逐 巡洋 战列 航母 潜艇
+　　研发 金币 特种 超级战舰　8 / VIII / 8-10 / 8级以上　不要金币　3艘
+　“我的”= 持有清单，没有清单时用玩过的船；没绑定时从全库抽
+/wows 持有 [添加|删除|设置|导入|清空|关闭] [船名…]　管理持有清单
+/wows 船库状态　船库与船名数据状态（管理员：船库更新 / 船库校验）
 别名：/窝窝战绩
 最近战绩依靠定时记录战绩快照得出：绑定或首次查询后开始记录，之前的场次查不到。"""
 
@@ -37,6 +43,9 @@ BATTLES_WORDS = {"场次", "战斗", "battles"}
 BATTLE_WORDS = {"单场", "battle"}
 SHIP_WORDS = {"单船", "战舰", "ship"}
 HELP_WORDS = {"help", "--help", "帮助"}
+PICK_WORDS = {"选船", "随机船", "随机选船", "玩什么船", "这把玩什么船", "pick"}
+OWNED_WORDS = {"持有", "持有清单", "我的船"}
+CATALOG_WORDS = {"船库更新": "更新", "船库校验": "校验", "船库状态": "状态", "更新船库": "更新", "校验船库": "校验"}
 # “wows 生涯 张三” / “wows 张三 总战绩”: the default card anyway, so these words are just dropped
 TOTAL_WORDS = {"总战绩", "生涯", "生涯战绩", "总", "战绩", "总览", "全部战绩"}
 
@@ -68,9 +77,10 @@ class Filter:
 
 @dataclass(frozen=True)
 class Command:
-    action: str  # help | total | recent | bind | unbind | battles | battle | ship
+    action: str  # help | total | recent | bind | unbind | battles | battle | ship | pick | owned | catalog
     target: Query | None = None  # None = the caller's bound account (or the @mentioned user's)
     filter: Filter | None = None  # ship: Filter(ship=name, mode=pvp|rank_solo|None)
+    text: str = ""  # pick / owned / catalog: the raw arguments (parsed by the ship picker)
 
 
 FILTER_USAGE = ("筛选写法：今天 / 昨天 / 前天 / 近3天 / 10-15 / 10-12~10-15，上午 / 下午 / 晚上 / 凌晨 / 14点后 / 14-18点，船=船名，随机 / 排位 / 单野 / 组队 / 双排 / 三排，"
@@ -268,6 +278,14 @@ def parse_command(raw: str) -> Command:
     rest = parts[1:]
     if len(parts) == 1 and head in HELP_WORDS:
         return Command("help")
+    if head in PICK_WORDS:
+        return Command("pick", text=" ".join(rest))
+    if head in OWNED_WORDS:
+        return Command("owned", text=" ".join(rest))
+    if head in CATALOG_WORDS:
+        return Command("catalog", text=CATALOG_WORDS[head])
+    if head == "船库" and len(rest) == 1 and rest[0] in ("更新", "校验", "状态"):
+        return Command("catalog", text=rest[0])
     if head in UNBIND_WORDS:
         if rest:
             raise WowsError("用法：/wows 解绑")

@@ -1,8 +1,8 @@
 """AstrBot entry point.
 
-The query logic, cards, snapshot tracking and the structured LLM tool live in ./wows (framework-free, tested
-directly). This file wires them to AstrBot: config, the /wows command, the LLM tool and when to offer it,
-the background poller and cleanup.
+The query logic, cards, snapshot tracking, the ship picker and the structured LLM tool live in ./wows
+(framework-free, tested directly). This file wires them to AstrBot: config, the /wows and /这把玩什么船
+commands, the LLM tool and when to offer it, the background jobs and cleanup.
 """
 import asyncio
 import re
@@ -20,6 +20,7 @@ from .wows.api import WowsApi
 from .wows.app import WowsApp
 from .wows.commands import WowsError
 from .wows.hints import HINTS
+from .wows.picker.service import Picker, PickerSettings
 from .wows.renderer import CardRenderer
 from .wows.ship_names import SHIP_NAMES
 from .wows.storage import Storage
@@ -28,9 +29,11 @@ from .wows import tool as wows_tool
 
 PLUGIN_NAME = "astrbot_plugin_wows_asia"
 COMMANDS = ("wows", "窝窝战绩")
+PICK_COMMANDS = ("这把玩什么船", "选船", "随机船")
+PICKER_TICK_SECONDS = 3600
 
 HINTS.update(
-    app_id="请管理员在 AstrBot 管理面板 → 插件 → WoWS 亚服战绩 的配置里填写 WG application_id",
+    app_id="请管理员在 AstrBot 管理面板 → 插件 → WoWS 亚服战绩与选船 的配置里填写 WG application_id",
     browser="在插件配置里填写浏览器路径",
     max_tracked="在插件配置里调大“最多记录的玩家数”",
     prefix="指令前缀以 AstrBot 的唤醒词为准（默认 /），群聊里也可以 @机器人 后发送。",
@@ -63,6 +66,23 @@ def _schema(name: str, parameters: dict):
     return deco
 
 
+def _picker_settings(config) -> PickerSettings:
+    group = config.get("ship_picker") if hasattr(config, "get") else None
+    group = group if isinstance(group, dict) else {}
+    lo = _num(group, "tier_min", 5, 1, 11)
+    hi = _num(group, "tier_max", 10, 1, 11)
+    style = str(group.get("image_style", "large"))
+    return PickerSettings(
+        enabled=bool(group.get("enabled", True)),
+        cooldown=_num(group, "cooldown_seconds", 5, 0, 3600),
+        tier_min=min(lo, hi), tier_max=max(lo, hi),
+        default_pool="catalog" if str(group.get("default_pool", "auto")) == "catalog" else "auto",
+        image_style=style if style in ("large", "small", "contour", "none") else "large",
+        auto_update=bool(group.get("auto_update", True)),
+        names_download=bool(group.get("names_auto_download", False)),
+    )
+
+
 def _num(config, key: str, default, lo, hi, cast=int):
     try:
         value = cast(config.get(key, default))
@@ -81,7 +101,7 @@ class WowsAsiaPlugin(Star):
         data_dir = Path(get_astrbot_data_path()) / "plugin_data" / PLUGIN_NAME
         data_dir.mkdir(parents=True, exist_ok=True)
         names = str(config.get("ship_names_path", "") or "").strip()
-        SHIP_NAMES.path = Path(names) if names else Path(get_astrbot_data_path()) / "wows_ship" / "names" / "zh_sg.json"
+        SHIP_NAMES.path = Path(names) if names else None  # bundled table (+ optional download) otherwise
         self.api = WowsApi(str(config.get("application_id", "") or ""),
                            timeout=_num(config, "timeout_seconds", 15, 1, 60, float))
         self.storage = Storage(data_dir / "wows_asia.sqlite3")
@@ -94,10 +114,14 @@ class WowsAsiaPlugin(Star):
         if str(config.get("render_mode", "image")) != "text":
             self.renderer = CardRenderer(str(config.get("browser_path", "") or ""),
                                          _num(config, "render_scale", 1.5, 1, 3, float))
+        self.picker = Picker(self.api, self.storage, self.renderer, data_dir=data_dir, names=SHIP_NAMES,
+                             settings=_picker_settings(config), logger=logger)
         self.app = WowsApp(self.api, self.storage, self.renderer, tracker=self.tracker,
                            cache_seconds=_num(config, "cache_seconds", 60, 0, 3600),
-                           min_battles=_num(config, "min_battles", 50, 0, 1000), poll_minutes=poll, logger=logger)
+                           min_battles=_num(config, "min_battles", 50, 0, 1000), poll_minutes=poll, logger=logger,
+                           picker=self.picker)
         self._poller: asyncio.Task | None = None
+        self._picker_job: asyncio.Task | None = None
         self.cards_only = str(config.get("ai_reply", "点评")) == "只发卡片"
         self.on_demand = bool(config.get("tool_on_demand", True))
         extra = re.split(r"[\s,，、]+", str(config.get("tool_keywords", "") or ""))
@@ -107,6 +131,8 @@ class WowsAsiaPlugin(Star):
     async def initialize(self):
         if self.api.configured:
             self._poller = asyncio.create_task(self._poll_loop())
+            if self.picker.settings.enabled:
+                self._picker_job = asyncio.create_task(self._picker_loop())
         else:
             logger.warning("WoWS 亚服战绩：还没有配置 WG application_id，查询和战绩记录暂不可用。")
 
@@ -122,6 +148,17 @@ class WowsAsiaPlugin(Star):
             except Exception as exc:  # never let one bad poll stop the loop
                 logger.warning(f"WoWS snapshot poll failed: {type(exc).__name__}")
             await asyncio.sleep(self.tracker.tick_minutes * 60)
+
+    async def _picker_loop(self):
+        await asyncio.sleep(20)
+        while True:
+            try:
+                await self.picker.maintenance()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(f"WoWS ship picker maintenance failed: {type(exc).__name__}")
+            await asyncio.sleep(PICKER_TICK_SECONDS)
 
     # ---- helpers ----
     @staticmethod
@@ -142,7 +179,7 @@ class WowsAsiaPlugin(Star):
         return out
 
     @staticmethod
-    def _args(text: str, event: AstrMessageEvent | None = None) -> str:
+    def _args(text: str, event: AstrMessageEvent | None = None, commands=COMMANDS) -> str:
         """Drop the command word and “@昵称(QQ号)” texts (the @ itself is read from the message components)."""
         text = text or ""
         for c in event.get_messages() if event is not None else []:
@@ -150,7 +187,7 @@ class WowsAsiaPlugin(Star):
                 text = text.replace(f"@{c.name}({c.qq})", " ")
         text = _AT_TEXT.sub(" ", text).strip()
         text = re.sub(r"^[/／]", "", text)
-        for name in COMMANDS:
+        for name in commands:
             if text.lower() == name or text.lower().startswith(name + " "):
                 return text[len(name):].strip()
         return text
@@ -160,13 +197,39 @@ class WowsAsiaPlugin(Star):
     async def wows(self, event: AstrMessageEvent):
         """WoWS 亚服战绩查询，发送 /wows 帮助 查看用法"""
         reply = await self.app.handle(self._user_key(event), self._args(event.message_str, event),
-                                      mentions=self._mentions(event, event.message_str))
+                                      mentions=self._mentions(event, event.message_str),
+                                      requester=self._requester(event), is_admin=self._is_admin(event))
+        yield self._result(event, reply)
+
+    @filter.command("这把玩什么船", alias={"选船", "随机船"})
+    async def pick_ship(self, event: AstrMessageEvent):
+        """随机选一艘船：/这把玩什么船 [我的/全库] [国家] [舰种] [分类] [等级]，例如 /选船 日本 战列 8-10"""
+        outcome = await self.picker.pick(self._user_key(event),
+                                         self._args(event.message_str, event, PICK_COMMANDS),
+                                         self._requester(event))
+        yield self._result(event, outcome.reply())
+
+    @staticmethod
+    def _result(event: AstrMessageEvent, reply):
         if isinstance(reply, tuple):
             reply = reply[0]
         if isinstance(reply, bytes):
-            yield event.chain_result([Comp.Image.fromBytes(reply)])
-        else:
-            yield event.plain_result(reply)
+            return event.chain_result([Comp.Image.fromBytes(reply)])
+        return event.plain_result(reply)
+
+    @staticmethod
+    def _requester(event: AstrMessageEvent) -> str:
+        try:
+            return str(event.get_sender_name() or event.get_sender_id() or "")
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _is_admin(event: AstrMessageEvent) -> bool:
+        try:
+            return bool(event.is_admin())
+        except Exception:
+            return False
 
     @_schema(wows_tool.NAME, wows_tool.SCHEMA)
     @filter.llm_tool(name=wows_tool.NAME)
@@ -213,12 +276,15 @@ class WowsAsiaPlugin(Star):
         return any(len(n) >= 2 and n in text for n in names)
 
     async def terminate(self):
-        if self._poller is not None:
-            self._poller.cancel()
+        for task in (self._poller, self._picker_job):
+            if task is None:
+                continue
+            task.cancel()
             try:
-                await self._poller
+                await task
             except (asyncio.CancelledError, Exception):
                 pass
+        await self.picker.close()
         if self.renderer is not None:
             await self.renderer.close()
         await self.api.close()

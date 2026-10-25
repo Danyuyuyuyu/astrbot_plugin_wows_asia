@@ -1,8 +1,8 @@
 name: astrbot_plugin_wows_asia
-display_name: WoWS 亚服战绩
+display_name: WoWS 亚服战绩与选船
 author: Danyuyuyuyu
-desc: 战舰世界（WoWS）亚服战绩查询：总战绩、单船战绩、最近战绩（逐场记录）、场次筛选与单场详情卡片，支持账号绑定、@群友查询和大模型函数调用。
-short_desc: 战舰世界亚服战绩卡片查询，支持逐场记录与大模型调用。
-version: 0.2.0
+desc: 战舰世界（WoWS）亚服战绩查询与随机选船：总战绩、单船战绩、最近战绩（逐场记录）、场次筛选与单场详情卡片，“这把玩什么船”随机选船（持有清单 / 玩过的船 / 全库），支持账号绑定、@群友查询和大模型函数调用。
+short_desc: 战舰世界亚服战绩卡片查询与随机选船，支持逐场记录与大模型调用。
+version: 0.3.0
 repo: https://github.com/Danyuyuyuyu/astrbot_plugin_wows_asia
 astrbot_version: ">=4.9.2"
