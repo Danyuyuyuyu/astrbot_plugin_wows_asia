@@ -1,5 +1,6 @@
 """AstrBot entry point: loaded the way AstrBot loads plugins (<plugin dir>.main), driven with real event types."""
 import importlib
+import json
 import re
 from pathlib import Path
 
@@ -98,37 +99,99 @@ async def test_command_text_and_image():
         await plugin.terminate()
 
 
-async def test_llm_tool_sends_card_and_returns_data():
+def tool_json(text):
+    return json.loads(text)
+
+
+async def test_llm_tool_sends_card_and_returns_status():
     plugin, fake = make_plugin()
     try:
-        ev = Event("帮我看看我的总战绩")
         await plugin.app.handle("aiocqhttp:10001", "绑定 Example_Player")
-        result = await plugin.wows_query(ev, "wows")
+        ev = Event("帮我看看我的总战绩")
+        data = tool_json(await plugin.wows_query(ev, action="总战绩"))
         assert len(ev.sent) == 1 and isinstance(ev.sent[0].chain[0], Comp.Image)
-        assert "卡片上的数据" in result and "Example_Player 总战绩：随机 1,000 场" in result
-        ev2 = Event("查一下")
-        result = await plugin.wows_query(ev2, "最近 Pi")
-        assert ev2.sent == [] and "还没有发给用户" in result and "至少 3 个字符" in result
+        assert data["status"] == "ok" and data["card_sent_to_user"] is True
+        assert "Example_Player 总战绩：随机 1,000 场" in data["data"] and "点评" in data["next"]
+        ev2 = Event("查一下 Pi")
+        data = tool_json(await plugin.wows_query(ev2, action="最近", player="Pi"))
+        assert ev2.sent == [] and data["status"] == "error" and "至少 3 个字符" in data["message"]
+        ev3 = Event("帮我看看他的")
+        data = tool_json(await plugin.wows_query(ev3, action="单船"))
+        assert ev3.sent == [] and data["status"] == "invalid" and "ship" in data["message"]
     finally:
         await plugin.terminate()
 
 
-def test_llm_tool_registered_with_guide():
+async def test_llm_tool_mentions_and_unbound():
+    plugin, fake = make_plugin()
+    try:
+        ev = Event("查查 @小明(20002) 的战绩", [Comp.Plain("查查 "), Comp.At(qq="20002", name="小明")])
+        data = tool_json(await plugin.wows_query(ev, action="总战绩", mention_id="20002"))
+        assert data["status"] == "mention_not_bound" and data["card_sent_to_user"] is False
+        await plugin.app.handle("aiocqhttp:20002", "绑定 Example_Player")
+        data = tool_json(await plugin.wows_query(ev, action="总战绩", mention_id="@"))
+        assert data["status"] == "ok" and len(ev.sent) == 1
+        data = tool_json(await plugin.wows_query(ev, action="总战绩", player="@小明(20002)"))
+        assert data["status"] == "ok"
+        data = tool_json(await plugin.wows_query(Event("查他"), action="总战绩", mention_id="@"))
+        assert data["status"] == "invalid"
+        data = tool_json(await plugin.wows_query(Event("我的战绩", sender="30003"), action="最近"))
+        assert data["status"] == "not_bound" and "/wows 绑定" in data["next"]
+    finally:
+        await plugin.terminate()
+
+
+async def test_cards_only_mode_ends_turn():
+    plugin, fake = make_plugin()
+    plugin.cards_only = True
+    try:
+        await plugin.app.handle("aiocqhttp:10001", "绑定 Example_Player")
+        ev = Event("我的总战绩")
+        assert await plugin.wows_query(ev, action="总战绩") is None and len(ev.sent) == 1
+        data = tool_json(await plugin.wows_query(Event("x"), action="绑定"))
+        assert data["status"] == "invalid"  # text results still go back to the model
+    finally:
+        await plugin.terminate()
+
+
+def test_llm_tool_registered_with_schema():
     tool = llm_tools.get_func("wows_query")
-    assert tool is not None and "选指令" in tool.description and "TOOL_DOC" not in tool.description
-    assert tool.parameters["properties"]["command"]["type"] == "string"
-    assert len(tool.description) <= 1100  # sent with every LLM request
+    assert tool is not None and tool.description == main.wows_tool.DESCRIPTION
+    params = tool.parameters
+    assert params["required"] == ["action"] and "单船" in params["properties"]["action"]["enum"]
+    assert params["properties"]["limit"]["type"] == "integer"
+    size = len(tool.description) + len(json.dumps(params, ensure_ascii=False))
+    assert size <= 1300, size  # sent with every WoWS-related LLM request
 
 
-def test_tool_guide_examples_parse():
-    line = next(x for x in main.TOOL_DOC.splitlines() if x.startswith("例："))
-    examples = re.findall(r"→([^；。]+)", line)
-    assert len(examples) >= 8
-    actions = {"最近": "recent", "场次": "battles", "单场": "battle", "绑定": "bind", "单船": "ship", "战舰": "ship"}
-    for example in examples:
-        args = "" if example == "（留空）" else example
-        cmd = commands.parse_command(args)
-        assert cmd.action == actions.get(args.split()[0] if args else "", "total"), example
+async def test_tool_offered_on_demand():
+    from astrbot.core.agent.tool import FunctionTool, ToolSet
+    from astrbot.core.provider.entities import ProviderRequest
+
+    plugin, fake = make_plugin()
+    other = FunctionTool(name="weather", description="d", parameters={"type": "object", "properties": {}})
+
+    async def offered(text, **kw):
+        req = ProviderRequest(prompt=text, func_tool=ToolSet([llm_tools.get_func("wows_query"), other]))
+        await plugin._offer_tool(Event(text, **kw), req)
+        assert req.func_tool.get_tool("weather") is not None
+        return req.func_tool.get_tool("wows_query") is not None
+
+    try:
+        assert not await offered("今天中午吃什么")
+        assert await offered("我昨天打得怎么样")
+        assert await offered("看看张三三的战绩")
+        plugin.api._ships[1] = (float("inf"), importlib.import_module(f"{ROOT.name}.wows.api").ShipInfo(1, "大和", 10, "Battleship"))
+        assert await offered("张三三的大和呢")
+        plugin.keywords = ["上分"]
+        assert await offered("今晚一起上分")
+        await plugin.wows_query(Event("x", sender="7"), action="绑定")
+        assert await offered("那他呢")  # follow-up in the same session
+        plugin._tool_used.clear()
+        plugin.on_demand = False
+        assert await offered("今天中午吃什么")
+    finally:
+        await plugin.terminate()
 
 
 async def test_initialize_without_app_id_and_terminate():
@@ -137,8 +200,19 @@ async def test_initialize_without_app_id_and_terminate():
     assert plugin._poller is None
     await plugin.terminate()
     plugin = main.WowsAsiaPlugin(None, {"application_id": "x", "render_mode": "text", "poll_minutes": 1})
-    assert plugin.tracker.poll_minutes == 3 and plugin.renderer is None  # clamped like the NoneBot config
+    assert plugin.tracker.poll_minutes == 3 and plugin.renderer is None  # clamped to the allowed range
     await plugin.initialize()
     assert plugin._poller is not None
     await plugin.terminate()
     assert plugin._poller.cancelled()
+
+
+def test_schema_converts_for_providers():
+    from astrbot.core.agent.tool import ToolSet
+
+    tools = ToolSet([llm_tools.get_func("wows_query")])
+    openai = tools.openai_schema()[0]["function"]
+    assert openai["parameters"]["properties"]["sort"]["enum"][1] == "伤害"
+    assert tools.anthropic_schema()[0]["input_schema"]["required"] == ["action"]
+    gemini = json.dumps(tools.google_schema(), ensure_ascii=False)
+    assert "单船" in gemini and "nth" in gemini

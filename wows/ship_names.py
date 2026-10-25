@@ -60,6 +60,10 @@ class ShipNameMap:
         self._signature = signature
         self._warned_signature = object()
 
+    def names(self) -> set[str]:
+        self._reload_if_needed()
+        return set(self._names.values())
+
     def name_for(self, ship_id: int, fallback: str) -> str:
         self._reload_if_needed()
         try:

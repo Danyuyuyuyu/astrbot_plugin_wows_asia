@@ -280,6 +280,10 @@ class WowsApi:
         self._ladder[clan_id] = (now + (ttl if result else 300), result)
         return result
 
+    def known_ship_names(self) -> set[str]:
+        """Names of every ship looked up so far (used to spot ship names in chat)."""
+        return {entry[1].name for entry in self._ships.values() if entry[1] is not None and entry[1].name}
+
     async def ships_info(self, ship_ids: list[int], ttl: float = 86400) -> dict[int, ShipInfo]:
         now = time.monotonic()
         missing = [i for i in dict.fromkeys(ship_ids) if i not in self._ships or self._ships[i][0] <= now]

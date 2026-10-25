@@ -1,1 +1,1 @@
-"""Framework-free WoWS Asia core, synced from nonebot-plugin-wows-asia by scripts/sync_core.py."""
+"""Framework-free WoWS Asia core (originally from nonebot-plugin-wows-asia, now maintained here)."""

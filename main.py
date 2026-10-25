@@ -1,26 +1,30 @@
 """AstrBot entry point.
 
-The query logic, cards and snapshot tracking live in ./wows, a framework-free core shared verbatim with
-nonebot-plugin-wows-asia (scripts/sync_core.py). This file only wires it to AstrBot: config, the /wows
-command, the LLM tool, the background poller and cleanup.
+The query logic, cards, snapshot tracking and the structured LLM tool live in ./wows (framework-free, tested
+directly). This file wires them to AstrBot: config, the /wows command, the LLM tool and when to offer it,
+the background poller and cleanup.
 """
 import asyncio
 import re
+import time
 from pathlib import Path
 
 import astrbot.api.message_components as Comp
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
+from astrbot.core.provider.register import llm_tools
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .wows.api import WowsApi
 from .wows.app import WowsApp
+from .wows.commands import WowsError
 from .wows.hints import HINTS
 from .wows.renderer import CardRenderer
 from .wows.ship_names import SHIP_NAMES
 from .wows.storage import Storage
 from .wows.tracker import Tracker
+from .wows import tool as wows_tool
 
 PLUGIN_NAME = "astrbot_plugin_wows_asia"
 COMMANDS = ("wows", "窝窝战绩")
@@ -32,16 +36,10 @@ HINTS.update(
     prefix="指令前缀以 AstrBot 的唤醒词为准（默认 /），群聊里也可以 @机器人 后发送。",
 )
 
-TOOL_DOC = """查询窝窝/WoWS（战舰世界）亚服战绩。结果是一张卡片图片，会直接发到聊天里，工具返回卡片上的数据。用户明确要查战绩时才调用，一个请求只调用一次；数据以本次调用结果为准，不要凭之前的结果回答。
-选指令（command 的写法，参数空格分隔、顺序随意）：总战绩/生涯→只写谁（不加“生涯”等字）；近况/最近战绩→最近 [谁]；某艘船整体打得怎样→单船 船名 [谁]（船名放第一个，看生涯数据）；某段时间/打了哪些场（可限定船）→场次 [谁] [筛选]（列出全部，默认近7天）；只要其中一把的细节→单场 [谁] [筛选] [第N把]（默认最新一把，第N把=从最新往前数）；拿不准时用 场次。
-谁：查提问者本人或被@的群友时不写（插件按提问者的绑定、消息里的@查找）；其他人写玩家完整昵称或 id 账号ID。不要猜测或编造昵称。
-筛选：今天 昨天 前天 近N天 本周 10-15 10-12~10-15｜上午 下午 晚上 凌晨 今天下午 14点后 14-18点｜船=船名（错字、同音字会自动纠正）｜随机 排位 单野 组队 双排 三排｜胜 负｜按伤害/击沉/经验/侦察/潜在（从高到低），伤害最低、击沉最少等（从低到高），最好/最差（按经验）｜前N。
-例：查查我最近的战绩→最近；我昨天打得怎么样→场次 昨天；看看张三三今天下午打的伊吹→场次 张三三 今天下午 船=伊吹；张三三伤害最高的一把→单场 张三三 按伤害；近3天最差的5把→场次 近3天 最差5把；我的总战绩→（留空）；张三三总战绩→张三三；张三三的大和打得怎么样→单船 大和 张三三；绑定我的号 ABC→绑定 ABC。
-看结果：卡片已发到聊天里，简短点评即可，不用逐项复述；“按时间第2/共2场”指发生顺序。最近战绩还没有数据时卡片已附生涯概要，不要再自动查总战绩；提示未绑定时请用户发“/wows 绑定 昵称”（只有用户给出昵称并要求绑定才代为绑定）；提示“是不是想查”时可换成建议的船名重查一次；只能查到开始记录之后的场次。
-
-Args:
-    command(string): 查询参数，即 /wows 后面的部分，如 "最近"、"场次 昨天 船=大和"、"单船 大和 张三三"；查本人总战绩时传空字符串
-"""
+# messages that may be about WoWS keep the tool; other chats don't pay for its definition
+_TOPIC = re.compile(r"wows|窝窝|战舰|战绩|船|场次|单场|胜率|伤害|击沉|经验|排位|随机|单野|单排|双排|三排|组队|开黑|绑定|生涯|"
+                    r"打得|打的|几把|几场|一把|那把|最近|军团", re.I)
+FOLLOW_UP_SECONDS = 600
 
 _AT_TEXT = re.compile(r"@[^\s@()（）]*\((\d+)\)")  # aiocqhttp writes @others into message_str as "@昵称(QQ号)"
 
@@ -50,6 +48,17 @@ def _doc(text: str):
     """llm_tool reads the tool description from the docstring at decoration time."""
     def deco(func):
         func.__doc__ = text
+        return func
+    return deco
+
+
+def _schema(name: str, parameters: dict):
+    """Docstring-declared tools only support plain types; swap in the full JSON schema (enums, required)."""
+    def deco(func):
+        for tool in reversed(llm_tools.func_list):
+            if tool.name == name:
+                tool.parameters = parameters
+                break
         return func
     return deco
 
@@ -89,6 +98,11 @@ class WowsAsiaPlugin(Star):
                            cache_seconds=_num(config, "cache_seconds", 60, 0, 3600),
                            min_battles=_num(config, "min_battles", 50, 0, 1000), poll_minutes=poll, logger=logger)
         self._poller: asyncio.Task | None = None
+        self.cards_only = str(config.get("ai_reply", "点评")) == "只发卡片"
+        self.on_demand = bool(config.get("tool_on_demand", True))
+        extra = re.split(r"[\s,，、]+", str(config.get("tool_keywords", "") or ""))
+        self.keywords = [w for w in extra if w]
+        self._tool_used: dict[str, float] = {}  # session -> last time the tool ran
 
     async def initialize(self):
         if self.api.configured:
@@ -154,19 +168,49 @@ class WowsAsiaPlugin(Star):
         else:
             yield event.plain_result(reply)
 
-    @filter.llm_tool(name="wows_query")
-    @_doc(TOOL_DOC)
-    async def wows_query(self, event: AstrMessageEvent, command: str = ""):
-        reply = await self.app.handle(self._user_key(event), self._args(command, event),
-                                      mentions=self._mentions(event, command), ai=True)
-        if isinstance(reply, tuple):
-            image, caption = reply
-            await event.send(event.chain_result([Comp.Image.fromBytes(image)]))
-            return f"战绩卡片图片已发到聊天里，用户能看到。卡片上的数据：\n{caption}"
-        if isinstance(reply, bytes):
-            await event.send(event.chain_result([Comp.Image.fromBytes(reply)]))
-            return "战绩卡片图片已发到聊天里，用户能看到。"
-        return f"查询结果（还没有发给用户，请据此回答）：\n{reply}"
+    @_schema(wows_tool.NAME, wows_tool.SCHEMA)
+    @filter.llm_tool(name=wows_tool.NAME)
+    @_doc(wows_tool.DESCRIPTION)
+    async def wows_query(self, event: AstrMessageEvent, **args):
+        self._tool_used[event.unified_msg_origin] = time.monotonic()
+        try:
+            cmd, mention, notes = wows_tool.parse_args(args)
+        except wows_tool.InvalidArgs as exc:
+            return wows_tool.invalid(str(exc))
+        except WowsError as exc:  # e.g. a ship or player name the core rejects
+            return wows_tool.invalid(str(exc))
+        mentions = []
+        if mention == "@":
+            mentions = self._mentions(event, event.message_str)[:1]
+            if not mentions:
+                return wows_tool.invalid("消息里没有@任何人；查提问者本人时 mention_id 留空")
+        elif mention:
+            mentions = [f"{event.get_platform_name()}:{mention}"]
+        outcome = await self.app.execute(self._user_key(event), cmd, mentions=mentions)
+        if outcome.image is not None:
+            await event.send(event.chain_result([Comp.Image.fromBytes(outcome.image)]))
+            if self.cards_only:
+                return None  # AstrBot ends the turn here: no extra model call, the card is the answer
+        return wows_tool.result(outcome, sent=outcome.image is not None, notes=notes)
+
+    @filter.on_llm_request()
+    async def _offer_tool(self, event: AstrMessageEvent, req):
+        """Only offer wows_query when the message looks WoWS-related (or right after it was used)."""
+        if not self.on_demand or req.func_tool is None or req.func_tool.get_tool(wows_tool.NAME) is None:
+            return
+        if self._relevant(event):
+            return
+        req.func_tool.remove_tool(wows_tool.NAME)
+
+    def _relevant(self, event: AstrMessageEvent) -> bool:
+        used = self._tool_used.get(event.unified_msg_origin)
+        if used is not None and time.monotonic() - used < FOLLOW_UP_SECONDS:
+            return True
+        text = event.message_str or ""
+        if _TOPIC.search(text) or any(w in text for w in self.keywords):
+            return True
+        names = self.api.known_ship_names() | SHIP_NAMES.names()
+        return any(len(n) >= 2 and n in text for n in names)
 
     async def terminate(self):
         if self._poller is not None:

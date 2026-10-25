@@ -11,21 +11,57 @@
     "description": "输出方式",
     "type": "string",
     "default": "image",
-    "options": ["image", "text"],
-    "labels": ["卡片图片", "纯文字"],
+    "options": [
+      "image",
+      "text"
+    ],
+    "labels": [
+      "卡片图片",
+      "纯文字"
+    ],
     "hint": "卡片图片需要 Chromium：在 AstrBot 的 Python 环境里执行 python -m playwright install chromium（Linux 可加 --with-deps）。"
   },
   "render_scale": {
     "description": "卡片清晰度（缩放倍数）",
     "type": "float",
     "default": 1.5,
-    "slider": {"min": 1, "max": 3, "step": 0.25}
+    "slider": {
+      "min": 1,
+      "max": 3,
+      "step": 0.25
+    }
   },
   "browser_path": {
     "description": "浏览器路径（可选）",
     "type": "string",
     "default": "",
     "hint": "留空使用 Playwright 自带的 Chromium；也可以填系统里已装的 Chrome / Chromium / Edge 可执行文件路径。"
+  },
+  "ai_reply": {
+    "description": "大模型调用后的回复方式",
+    "type": "string",
+    "default": "点评",
+    "options": [
+      "点评",
+      "只发卡片"
+    ],
+    "labels": [
+      "发卡片并让模型点评",
+      "只发卡片（更快更省）"
+    ],
+    "hint": "只发卡片：卡片发出后直接结束这一轮，少调用一次模型；但模型拿不到卡片数据，之后追问具体数字时答不上来。"
+  },
+  "tool_on_demand": {
+    "description": "按需提供函数工具",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，只有消息看起来和窝窝战绩有关（战绩、船、场次、伤害、已查过的船名等关键词），或 10 分钟内刚用过时，才把 wows_query 工具交给模型，闲聊时省 token。识别不到你们常用的问法时可以添加关键词或关闭。"
+  },
+  "tool_keywords": {
+    "description": "额外关键词（可选）",
+    "type": "string",
+    "default": "",
+    "hint": "按需提供工具时额外识别的词，用空格或逗号分隔，例如：上分 开船 窝窝人。"
   },
   "timeout_seconds": {
     "description": "WG API 请求超时（秒）",

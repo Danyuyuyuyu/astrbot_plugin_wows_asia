@@ -57,7 +57,7 @@ def test_ship_filter_uses_client_name(tmp_path, monkeypatch):
     record = Record(1, 1700000000, 1699999900, 123, "pvp", Stat(battles=1, wins=1), None)
     flt = SimpleNamespace(
         period=None, hours=None, ship="Official Yamato", mode=None, team=None,
-        result=None, sort=None, limit=None, index=None,
+        result=None, sort=None, asc=False, limit=None, index=None,
     )
     picked = views.filter_records([record], flt, {123: ShipInfo(123, "API name", 10, "Battleship")},
                                   1700000000, default_days=None)

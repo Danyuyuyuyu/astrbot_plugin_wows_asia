@@ -1,6 +1,6 @@
-"""Command orchestration, independent from NoneBot so it can be tested directly."""
+"""Command orchestration, independent from AstrBot so it can be tested directly."""
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Union
 
 from . import cards, formatting, views
@@ -19,7 +19,28 @@ Reply = Union[str, bytes, tuple[bytes, str]]
 class Card:
     html: str
     text: str
-    caption: str = ""  # sent next to the image when an AI plugin invoked the command
+    caption: str = ""  # the card's numbers as text, handed to the LLM
+    status: str = "ok"
+    options: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Outcome:
+    """What a query produced, with a status the LLM tool can act on.
+
+    status: ok | help | not_bound | mention_not_bound | candidates | not_found | error | bound | unbound
+    | hidden | newbie | quota | tracking | idle | nomatch | noship
+    """
+    status: str
+    text: str = ""  # text reply, or the card's text version
+    image: bytes | None = None
+    caption: str = ""
+    options: list[str] = field(default_factory=list)  # nickname candidates / ship names to retry with
+
+    def reply(self, ai: bool = False) -> "Reply":
+        if self.image is None:
+            return self.text
+        return (self.image, self.caption) if ai and self.caption else self.image
 
 
 class WowsApp:
@@ -42,18 +63,24 @@ class WowsApp:
 
     async def handle(self, user_key: str | None, raw: str, *, mentions: list[str] | None = None,
                      ai: bool = False) -> Reply:
-        """mentions: user keys of @-ed users (query their bound account); ai: invoked by an AI plugin."""
+        """mentions: user keys of @-ed users (query their bound account); ai: also return the card's text."""
         try:
             cmd = parse_command(raw)
+        except WowsError as exc:
+            return str(exc)
+        return (await self.execute(user_key, cmd, mentions=mentions)).reply(ai)
+
+    async def execute(self, user_key: str | None, cmd: Command, *, mentions: list[str] | None = None) -> Outcome:
+        try:
             if cmd.action == "help":
-                return help_text()
+                return Outcome("help", help_text())
             if cmd.action == "unbind":
                 return self._unbind(user_key)
             if cmd.action == "bind":
                 return await self._bind(user_key, cmd.target)
-            account_id, reply = await self._target(user_key, cmd, mentions or [])
-            if reply is not None:
-                return reply
+            account_id, failed = await self._target(user_key, cmd, mentions or [])
+            if failed is not None:
+                return failed
             if cmd.action == "ship":
                 card = await self.ship_card(account_id, cmd.filter)
             elif cmd.action in ("battles", "battle"):
@@ -62,72 +89,78 @@ class WowsApp:
                 card = await self.recent_card(account_id)
             else:
                 card = await self.total_card(account_id)
-            return await self._output(card, ai)
+            return await self._output(card)
         except WowsError as exc:
             if self.logger:
                 # 只记类型与错误码，不回显异常文本（可能含请求 URL / application_id）
                 code = getattr(exc, "code", "") or "-"
                 self.logger.warning(f"WoWS command failed: {type(exc).__name__} code={code}")
-            return str(exc)
+            return Outcome("error", str(exc))
         except Exception as exc:
             # Do not log request objects/URLs or echo exception text containing app IDs.
             if self.logger:
                 self.logger.error(f"WoWS command failed unexpectedly: {type(exc).__name__}")
-            return "战绩查询遇到内部错误，请联系管理员检查插件环境。"
+            return Outcome("error", "战绩查询遇到内部错误，请联系管理员检查插件环境。")
 
-    async def _output(self, card: Card, ai: bool = False) -> Reply:
+    async def _output(self, card: Card) -> Outcome:
+        out = Outcome(card.status, card.text, caption=card.caption or card.text, options=list(card.options))
         if self.renderer is None:
-            return card.text
+            return out
         try:
-            image = await self.renderer.render(card.html)
-            return (image, card.caption) if ai and card.caption else image
+            out.image = await self.renderer.render(card.html)
         except Exception as exc:
             if self.logger:
                 self.logger.warning(f"WoWS card render failed, falling back to text: {type(exc).__name__}: {exc}")
-            return card.text
+        return out
 
     # ---- targets / binding ----
-    async def _target(self, user_key: str | None, cmd: Command, mentions: list[str]) -> tuple[int, Reply | None]:
+    async def _target(self, user_key: str | None, cmd: Command, mentions: list[str]) -> tuple[int, Outcome | None]:
         if cmd.target is None and mentions:
             bound = self.storage.binding(mentions[0])
             if bound is None:
-                return 0, "对方还没有绑定 WoWS 账号：可以让 TA 发送 /wows 绑定 昵称，或直接写对方的游戏昵称来查询。"
+                return 0, Outcome("mention_not_bound",
+                                  "对方还没有绑定 WoWS 账号：可以让 TA 发送 /wows 绑定 昵称，或直接写对方的游戏昵称来查询。")
             return bound[0], None
         if cmd.target is None:
             bound = self.storage.binding(user_key) if user_key else None
             if bound is None:
                 if cmd.action == "total":
-                    return 0, help_text()
-                return 0, "你还没有绑定账号：先用 /wows 绑定 你的昵称，或使用 /wows 最近 玩家昵称。"
+                    return 0, Outcome("not_bound", help_text())
+                return 0, Outcome("not_bound", "你还没有绑定账号：先用 /wows 绑定 你的昵称，或使用 /wows 最近 玩家昵称。")
             return bound[0], None
         return await self._resolve(cmd.target)
 
-    async def _resolve(self, query: Query) -> tuple[int, Reply | None]:
+    async def _resolve(self, query: Query) -> tuple[int, Outcome | None]:
         resolved = await self.api.resolve(query)
         if resolved.account_id is None:
-            return 0, formatting.candidates_text(resolved.candidates or [])
+            candidates = resolved.candidates or []
+            options = [f"{views.clean(r['nickname'])}（id {r['account_id']}）" for r in candidates]
+            return 0, Outcome("candidates" if candidates else "not_found", formatting.candidates_text(candidates),
+                              options=options)
         return resolved.account_id, None
 
-    def _unbind(self, user_key: str | None) -> str:
+    def _unbind(self, user_key: str | None) -> Outcome:
         if not user_key:
-            return "当前消息无法识别用户，不能解绑。"
-        return "已解除绑定。" if self.storage.unbind(user_key) else "你还没有绑定账号。"
+            return Outcome("error", "当前消息无法识别用户，不能解绑。")
+        if self.storage.unbind(user_key):
+            return Outcome("unbound", "已解除绑定。")
+        return Outcome("not_bound", "你还没有绑定账号。")
 
-    async def _bind(self, user_key: str | None, query: Query) -> str:
+    async def _bind(self, user_key: str | None, query: Query) -> Outcome:
         if not user_key:
-            return "当前消息无法识别用户，不能绑定。"
-        account_id, reply = await self._resolve(query)
-        if reply is not None:
-            return reply if isinstance(reply, str) else "绑定失败。"
+            return Outcome("error", "当前消息无法识别用户，不能绑定。")
+        account_id, failed = await self._resolve(query)
+        if failed is not None:
+            return failed
         account = await self._account(account_id)
         nickname = views.clean(account.get("nickname") or account_id)
         self.storage.bind(user_key, account_id, nickname, self.now())
         self.tracker.touch(account_id, nickname)
         msg = f"已绑定：{nickname}（{account_id}）。"
         if account.get("hidden_profile") is True:
-            return msg + "\n该账号隐藏了战绩，公开战绩后才能记录最近战绩。"
+            return Outcome("bound", msg + "\n该账号隐藏了战绩，公开战绩后才能记录最近战绩。")
         await self.tracker.refresh(account_id, last_battle_time=num(account.get("last_battle_time")))
-        return msg + "\n已开始记录战绩快照，之后打的每一场都会出现在 /wows 最近 里。"
+        return Outcome("bound", msg + "\n已开始记录战绩快照，之后打的每一场都会出现在 /wows 最近 里。")
 
     # ---- data ----
     async def _account(self, account_id: int) -> dict:
@@ -153,7 +186,8 @@ class WowsApp:
 
     def _state(self, state: views.StateView) -> Card:
         text = formatting.state_text(state)
-        return Card(cards.state_html(state, self.now()), text, f"{state.who.nickname}：{state.heading}。{state.text}")
+        return Card(cards.state_html(state, self.now()), text, f"{state.who.nickname}：{state.heading}。{state.text}",
+                    state.status or state.kind, list(state.options))
 
     async def total_card(self, account_id: int) -> Card:
         account = await self._account(account_id)
@@ -236,17 +270,19 @@ class WowsApp:
             return self._state(views.state_nomatch(who, title, "全部记录", "还没有记录到任何场次", baseline))
         infos = await self.api.ships_info(list({r.ship_id for r in records}))
         # 单场 / ship / sort queries look at every kept record; a plain 场次 list defaults to 7 days
-        default_days = None if single or flt.ship or flt.sort else 7
+        default_days = None if single or flt.ship or flt.sort or flt.asc else 7
         picked = views.filter_records(records, flt, infos, now, default_days=default_days)
         if not picked.records:
-            return self._state(views.state_nomatch(who, title, picked.desc, picked.empty_reason, baseline))
+            return self._state(views.state_nomatch(who, title, picked.desc, picked.empty_reason, baseline,
+                                                   picked.suggestions))
         states = self.storage.ship_states(account_id)
         if single:
             index = (flt.index or 1) - 1
             if index >= len(picked.records):
                 return self._state(views.state_nomatch(who, title, picked.desc,
                                                        f"只有 {len(picked.records)} 场符合条件", baseline))
-            view = views.build_battle(who, picked, index, records, states, now, by_time=not flt.sort)
+            view = views.build_battle(who, picked, index, records, states, now, by_time=not flt.sort,
+                                      oldest_first=flt.asc and not flt.sort)
             return Card(cards.battle_html(view), formatting.battle_text(view),
                         formatting.battle_text(view, with_title=False))
         view = views.build_battles(who, picked, flt, views.career_random(account), states, baseline, now)

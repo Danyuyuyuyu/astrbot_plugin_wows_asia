@@ -54,6 +54,8 @@ class StateView:
     heading: str
     text: str
     tip: str
+    status: str = ""  # for AI callers when it differs from kind (e.g. "nomatch" shares the idle look)
+    options: list[str] = field(default_factory=list)  # ship names worth retrying with
 
 
 @dataclass
@@ -309,6 +311,7 @@ class Picked:
     records: list[Record]
     desc: str  # human-readable filter, e.g. "昨天 · 大和 · 随机"
     empty_reason: str = ""  # set when nothing matched
+    suggestions: list[str] = field(default_factory=list)  # corrected ship names when the ship filter missed
 
 
 def _period_days(period: tuple | None, today):
@@ -398,6 +401,9 @@ def filter_records(records: list[Record], flt, infos: dict[int, ShipInfo], now: 
         if flt.sort in ("scouting", "potential"):
             out = [r for r in out if r.full]  # pre-0.2.7 records have no such data
         parts.append(f"按{SORT_CN[flt.sort]}{'从低到高' if flt.asc else '排序'}")
+    elif flt.asc:  # no metric + ascending = oldest first
+        out = sorted(out, key=lambda r: r.captured_at)
+        parts.append("从旧到新")
     reason = ""
     if not out:
         if not records:
@@ -412,7 +418,8 @@ def filter_records(records: list[Record], flt, infos: dict[int, ShipInfo], now: 
         else:
             reason = "没有符合条件的场次"
     rows = [battle_row(r, infos, with_date=True) for r in out]
-    return Picked(rows, out, " · ".join(p for p in parts if p), reason)
+    suggestions = list(found.suggestions) if found is not None and not found.ids and found.suggestions else []
+    return Picked(rows, out, " · ".join(p for p in parts if p), reason, suggestions)
 
 
 def battle_row(r: Record, infos: dict[int, ShipInfo], with_date: bool = False) -> BattleRow:
@@ -469,7 +476,7 @@ def build_battles(who: Identity, picked: Picked, flt, career: Stat, ship_states:
     teams = tuple(sum(d[i] for d in known) for i in range(3)) if known else None
     return BattlesView(who, picked.desc, summary, base, base_label, shown_rows, groups,
                        SORT_CN.get(flt.sort or "", ""), max(len(recs) - limit, 0),
-                       fmt_time(baseline_at, "%m-%d %H:%M"), now, teams, bool(flt.sort and flt.asc))
+                       fmt_time(baseline_at, "%m-%d %H:%M"), now, teams, bool(flt.asc))
 
 
 @dataclass
@@ -487,7 +494,8 @@ class BattleDetailView:
 
 
 def build_battle(who: Identity, picked: Picked, index: int, all_records: list[Record], ship_states: dict,
-                 now: int, history_size: int = 10, *, by_time: bool = True) -> BattleDetailView:
+                 now: int, history_size: int = 10, *, by_time: bool = True,
+                 oldest_first: bool = False) -> BattleDetailView:
     rec, row = picked.records[index], picked.rows[index]
     same = [r for r in all_records if r.ship_id == rec.ship_id and r.mode == rec.mode]
     same = sorted(same, key=lambda r: r.captured_at)
@@ -512,6 +520,8 @@ def build_battle(who: Identity, picked: Picked, index: int, all_records: list[Re
         place = f"第 {index + 1} / 共 {total} 场"
     elif total == 1:
         place = "共 1 场"
+    elif oldest_first:
+        place = f"{'最早一场' if index == 0 else f'第 {index + 1} 场'} · 按时间第 {index + 1} / 共 {total} 场"
     else:  # list is newest first: spell out both directions so "第 1" is never read as the earliest battle
         place = f"{'最新一场' if index == 0 else f'倒数第 {index + 1} 场'} · 按时间第 {total - index} / 共 {total} 场"
     position = f"{picked.desc} · {place}"
@@ -519,10 +529,11 @@ def build_battle(who: Identity, picked: Picked, index: int, all_records: list[Re
                             total - 1)
 
 
-def state_nomatch(who: Identity, title: str, desc: str, reason: str, baseline_at: int) -> StateView:
+def state_nomatch(who: Identity, title: str, desc: str, reason: str, baseline_at: int,
+                  suggestions: list[str] | None = None) -> StateView:
     return StateView("idle", title, who, desc, reason,
                      f"只能查到 {fmt_time(baseline_at, '%m-%d %H:%M')} 开始记录之后的场次，条件：{desc}。",
-                     "可以换个时间或去掉部分条件再试，例如：/wows 场次 近7天")
+                     "可以换个时间或去掉部分条件再试，例如：/wows 场次 近7天", "nomatch", list(suggestions or []))
 
 
 # ---- 单船 ----
@@ -642,4 +653,4 @@ def state_noship(who: Identity, query: str, suggestions: list[str], ships: list[
         tip = ("TA 开得最多的：" + " / ".join(names) + "。") if names else "TA 还没有随机或排位战斗记录。"
     return StateView("noship", "单船战绩", who, f"查找 · {q}", f"没开过“{q}”",
                      f"在 TA 打过随机或排位的船里，没有找到名字像“{q}”的船（船名支持错字、同音字，但需是 TA 开过的船）。",
-                     tip)
+                     tip, "", [clean(n, 24) for n in suggestions])
