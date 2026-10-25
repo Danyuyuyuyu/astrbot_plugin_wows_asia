@@ -1,0 +1,81 @@
+{
+  "application_id": {
+    "description": "WG application_id",
+    "type": "string",
+    "default": "",
+    "secret": true,
+    "obvious_hint": true,
+    "hint": "在 https://developers.wargaming.net/ 申请（服务器类型选 Server，填写机器人服务器的出口 IP）。不填无法查询。修改后需重载插件。"
+  },
+  "render_mode": {
+    "description": "输出方式",
+    "type": "string",
+    "default": "image",
+    "options": ["image", "text"],
+    "labels": ["卡片图片", "纯文字"],
+    "hint": "卡片图片需要 Chromium：在 AstrBot 的 Python 环境里执行 python -m playwright install chromium（Linux 可加 --with-deps）。"
+  },
+  "render_scale": {
+    "description": "卡片清晰度（缩放倍数）",
+    "type": "float",
+    "default": 1.5,
+    "slider": {"min": 1, "max": 3, "step": 0.25}
+  },
+  "browser_path": {
+    "description": "浏览器路径（可选）",
+    "type": "string",
+    "default": "",
+    "hint": "留空使用 Playwright 自带的 Chromium；也可以填系统里已装的 Chrome / Chromium / Edge 可执行文件路径。"
+  },
+  "timeout_seconds": {
+    "description": "WG API 请求超时（秒）",
+    "type": "float",
+    "default": 15
+  },
+  "cache_seconds": {
+    "description": "账号数据缓存时间（秒）",
+    "type": "int",
+    "default": 60
+  },
+  "poll_minutes": {
+    "description": "战绩记录检查间隔（分钟）",
+    "type": "int",
+    "default": 10,
+    "hint": "最近战绩 / 场次 / 单场靠定时保存战绩快照、对比差值得出。范围 3～720。"
+  },
+  "fast_poll_minutes": {
+    "description": "活跃账号检查间隔（分钟）",
+    "type": "int",
+    "default": 3,
+    "hint": "已绑定、刚开始记录或 2 小时内打过战斗的账号用这个间隔，两次快照之间基本只有一场。0 = 关闭。"
+  },
+  "track_days": {
+    "description": "未绑定账号的记录天数",
+    "type": "int",
+    "default": 14,
+    "hint": "未绑定的账号多少天没人查询后停止记录；绑定的账号一直记录。"
+  },
+  "max_tracked": {
+    "description": "最多记录的玩家数",
+    "type": "int",
+    "default": 200,
+    "hint": "未绑定账号的记录名额上限，绑定的账号不占名额。"
+  },
+  "record_days": {
+    "description": "逐场记录保留天数",
+    "type": "int",
+    "default": 30
+  },
+  "min_battles": {
+    "description": "完整总战绩卡的最少场数",
+    "type": "int",
+    "default": 50,
+    "hint": "随机场数少于这个值时只显示简要数据。"
+  },
+  "ship_names_path": {
+    "description": "客户端船名文件路径（可选）",
+    "type": "string",
+    "default": "",
+    "hint": "留空为 AstrBot 的 data/wows_ship/names/zh_sg.json；文件不存在时使用 WG API 的船名。"
+  }
+}

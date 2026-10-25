@@ -1,0 +1,3 @@
+httpx>=0.27,<1
+playwright>=1.40
+pypinyin>=0.44
