@@ -5,12 +5,13 @@ validated here. Bad arguments come back as status "invalid" with what to fix ins
 """
 from __future__ import annotations
 
-import json
 import re
 
-from .app import Outcome
 from .commands import (SELF_WORDS, TOTAL_WORDS, Command, Filter, Query, WowsError, _parse_filter, _ship_name,
                        _target)
+from .tool_common import NEXT, InvalidArgs, invalid, result
+
+__all__ = ["NAME", "DESCRIPTION", "SCHEMA", "InvalidArgs", "NEXT", "invalid", "result", "parse_args"]
 
 NAME = "wows_query"
 
@@ -25,6 +26,7 @@ ORDERS = {"从高到低": False, "从新到旧": False, "从低到高": True, "�
 DESCRIPTION = (
     "查战舰世界（窝窝/WoWS）亚服战绩。卡片图片直接发到聊天里，返回 JSON：status、卡片数据、next（下一步怎么做）。"
     "对比多人时分别调用。不要编造昵称或数字。最近/场次/单场只含开始记录后的场次；总战绩、单船是生涯数据。"
+    "随机选船请用 wows_pick_ship 工具。"
 )
 
 SCHEMA = {
@@ -51,10 +53,6 @@ SCHEMA = {
 
 _MENTION_TEXT = re.compile(r"@?.*?[(（](\d{5,})[)）]")  # WG nicknames never contain brackets
 _FILTER_KEYS = ("date", "start_hour", "end_hour", "mode", "result", "sort", "order", "limit", "nth")
-
-
-class InvalidArgs(WowsError):
-    """The model filled the tool in wrong; tell it what to fix."""
 
 
 def _text(args: dict, key: str) -> str:
@@ -179,46 +177,3 @@ def parse_args(args: dict) -> tuple[Command, str | None, list[str]]:
                  result=RESULTS[result] if result else None, sort=SORTS[sort_word] if sort_word else None,
                  asc=ORDERS[order_word] if order_word else False, limit=limit, index=nth)
     return Command(kind, target, flt), mention or None, notes
-
-
-NEXT = {
-    "ok": "卡片已发给用户，结合数据简短点评即可，不要逐项复述；“按时间第2/共2场”指发生顺序。",
-    "help": "提问者还没绑定账号。请用户发送“/wows 绑定 游戏昵称”；只有用户给出昵称并要求绑定时，才用 action=绑定 代为绑定。",
-    "not_bound": "提问者还没绑定账号。请用户发送“/wows 绑定 游戏昵称”，或告诉你要查的昵称；只有用户给出昵称并要求绑定时，才用 action=绑定 代为绑定。",
-    "mention_not_bound": "被@的人还没绑定账号。可以请 TA 发送“/wows 绑定 游戏昵称”，或问到 TA 的游戏昵称后用 player 查询。",
-    "candidates": "没有完全同名的玩家，options 是候选。把候选告诉用户并确认是哪一个，不要自己挑；确认后用对应的 account_id 查询。",
-    "not_found": "亚服没有这个昵称。请用户确认完整拼写（区分大小写）或提供账号 ID。",
-    "noship": "TA 没开过这艘船。options 里的船名明显就是用户说的那艘（错字、同音字）时可以用它重查一次，否则照实告诉用户，不要换成别的船。",
-    "nomatch": "没有符合条件的场次。options 里的船名明显就是用户说的那艘时可以用它重查一次；否则告诉用户并建议放宽条件。只能查到开始记录之后的场次。",
-    "tracking": "刚开始记录这个账号，之后打的场次才会出现；卡片已附生涯概要，不要再自动查总战绩。",
-    "idle": "记录期间近 7 天没有战斗；卡片已附生涯概要，不要再自动查总战绩。",
-    "hidden": "该玩家隐藏了战绩，查不到数据，照实告诉用户。",
-    "newbie": "随机场次太少，卡片只显示了基础数据。",
-    "quota": "记录名额已满，暂时不能记录这个账号，照实告诉用户（可以请管理员调大上限）。",
-    "bound": "绑定成功，告诉用户之后打的每一场都会被记录。",
-    "unbound": "已解除绑定。",
-    "error": "查询失败，把 message 照实告诉用户，不要重试。",
-    "invalid": "参数填写有误，按 message 修正后再调用一次。",
-}
-
-
-def result(outcome: Outcome, *, sent: bool, notes: list[str] | None = None) -> str:
-    data: dict = {"status": outcome.status}
-    if sent:
-        data["card_sent_to_user"] = True
-        data["data"] = outcome.caption or outcome.text
-    else:
-        data["card_sent_to_user"] = False
-        data["message"] = outcome.text
-    if outcome.options:
-        data["options"] = outcome.options
-    if notes:
-        data["notes"] = notes
-    data["next"] = NEXT.get(outcome.status, "")
-    if not sent and outcome.status in ("ok", "newbie", "tracking", "idle", "nomatch", "noship", "hidden", "quota"):
-        data["next"] = "用户还没看到结果，请据 message 用文字回答。" + data["next"].replace("卡片已发给用户，", "")
-    return json.dumps(data, ensure_ascii=False)
-
-
-def invalid(message: str) -> str:
-    return result(Outcome("invalid", message), sent=False)

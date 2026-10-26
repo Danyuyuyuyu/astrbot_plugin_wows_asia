@@ -1,8 +1,8 @@
 """AstrBot entry point.
 
-The query logic, cards, snapshot tracking, the ship picker and the structured LLM tool live in ./wows
+The query logic, cards, snapshot tracking, the ship picker and the structured LLM tools live in ./wows
 (framework-free, tested directly). This file wires them to AstrBot: config, the /wows and /这把玩什么船
-commands, the LLM tool and when to offer it, the background jobs and cleanup.
+commands, the LLM tools and when to offer them, the background jobs and cleanup.
 """
 import asyncio
 import re
@@ -20,6 +20,7 @@ from .wows.api import WowsApi
 from .wows.app import WowsApp
 from .wows.commands import WowsError
 from .wows.hints import HINTS
+from .wows.picker import tool as picker_tool
 from .wows.picker.service import Picker, PickerSettings
 from .wows.renderer import CardRenderer
 from .wows.ship_names import SHIP_NAMES
@@ -42,6 +43,9 @@ HINTS.update(
 # messages that may be about WoWS keep the tool; other chats don't pay for its definition
 _TOPIC = re.compile(r"wows|窝窝|战舰|战绩|船|场次|单场|胜率|伤害|击沉|经验|排位|随机|单野|单排|双排|三排|组队|开黑|绑定|生涯|"
                     r"打得|打的|几把|几场|一把|那把|最近|军团", re.I)
+# picker intents; kept separate from _TOPIC so stats and pick tools can be offered independently
+_PICK_TOPIC = re.compile(r"选.*船|挑.*船|抽.*船|来.*船|随机.*艘|随机船|玩什么船|选一?艘|挑一?艘|"
+                         r"抽一?艘|来一?艘|推荐.*船|船.*推荐", re.I)
 FOLLOW_UP_SECONDS = 600
 
 _AT_TEXT = re.compile(r"@[^\s@()（）]*\((\d+)\)")  # aiocqhttp writes @others into message_str as "@昵称(QQ号)"
@@ -126,9 +130,10 @@ class WowsAsiaPlugin(Star):
         self.on_demand = bool(config.get("tool_on_demand", True))
         extra = re.split(r"[\s,，、]+", str(config.get("tool_keywords", "") or ""))
         self.keywords = [w for w in extra if w]
-        self._tool_used: dict[str, float] = {}  # session -> last time the tool ran
+        self._tool_used: dict[tuple[str, str], float] = {}  # (session, tool name) -> last time it ran
 
     async def initialize(self):
+        self._verify_llm_tools()
         if self.api.configured:
             self._poller = asyncio.create_task(self._poll_loop())
             if self.picker.settings.enabled:
@@ -235,7 +240,7 @@ class WowsAsiaPlugin(Star):
     @filter.llm_tool(name=wows_tool.NAME)
     @_doc(wows_tool.DESCRIPTION)
     async def wows_query(self, event: AstrMessageEvent, **args):
-        self._tool_used[event.unified_msg_origin] = time.monotonic()
+        self._tool_used[(event.unified_msg_origin, wows_tool.NAME)] = time.monotonic()
         try:
             cmd, mention, notes = wows_tool.parse_args(args)
         except wows_tool.InvalidArgs as exc:
@@ -256,17 +261,38 @@ class WowsAsiaPlugin(Star):
                 return None  # AstrBot ends the turn here: no extra model call, the card is the answer
         return wows_tool.result(outcome, sent=outcome.image is not None, notes=notes)
 
+    @_schema(picker_tool.NAME, picker_tool.SCHEMA)
+    @filter.llm_tool(name=picker_tool.NAME)
+    @_doc(picker_tool.DESCRIPTION)
+    async def wows_pick_ship(self, event: AstrMessageEvent, **args):
+        self._tool_used[(event.unified_msg_origin, picker_tool.NAME)] = time.monotonic()
+        try:
+            request = picker_tool.parse_args(
+                args,
+                default_tiers=(self.picker.settings.tier_min, self.picker.settings.tier_max),
+                max_count=self.picker.settings.max_count,
+            )
+        except (picker_tool.InvalidArgs, WowsError) as exc:
+            return picker_tool.invalid(str(exc))
+        outcome = await self.app.pick_request(self._user_key(event), request, self._requester(event))
+        if outcome.image is not None:
+            await event.send(event.chain_result([Comp.Image.fromBytes(outcome.image)]))
+            if self.cards_only:
+                return None
+        return picker_tool.result(outcome, sent=outcome.image is not None)
+
     @filter.on_llm_request()
     async def _offer_tool(self, event: AstrMessageEvent, req):
-        """Only offer wows_query when the message looks WoWS-related (or right after it was used)."""
-        if not self.on_demand or req.func_tool is None or req.func_tool.get_tool(wows_tool.NAME) is None:
+        """Only offer the stats / picker tools when the message looks relevant (or right after use)."""
+        if not self.on_demand or req.func_tool is None:
             return
-        if self._relevant(event):
-            return
-        req.func_tool.remove_tool(wows_tool.NAME)
+        if not self._relevant(event):
+            req.func_tool.remove_tool(wows_tool.NAME)
+        if not self._relevant_pick(event):
+            req.func_tool.remove_tool(picker_tool.NAME)
 
     def _relevant(self, event: AstrMessageEvent) -> bool:
-        used = self._tool_used.get(event.unified_msg_origin)
+        used = self._tool_used.get((event.unified_msg_origin, wows_tool.NAME))
         if used is not None and time.monotonic() - used < FOLLOW_UP_SECONDS:
             return True
         text = event.message_str or ""
@@ -274,6 +300,22 @@ class WowsAsiaPlugin(Star):
             return True
         names = self.api.known_ship_names() | SHIP_NAMES.names()
         return any(len(n) >= 2 and n in text for n in names)
+
+    def _relevant_pick(self, event: AstrMessageEvent) -> bool:
+        if not self.picker.settings.enabled:
+            return False
+        used = self._tool_used.get((event.unified_msg_origin, picker_tool.NAME))
+        if used is not None and time.monotonic() - used < FOLLOW_UP_SECONDS:
+            return True
+        return bool(_PICK_TOPIC.search(event.message_str or ""))
+
+    def _verify_llm_tools(self) -> None:
+        """The full JSON schema is patched in by _schema; fail loudly if a future AstrBot changes func_list."""
+        expected = ((wows_tool.NAME, wows_tool.SCHEMA), (picker_tool.NAME, picker_tool.SCHEMA))
+        for name, schema in expected:
+            tool = llm_tools.get_func(name)
+            if tool is None or tool.parameters != schema:
+                logger.error(f"WoWS LLM 工具 {name} 未按预期注册，请检查 AstrBot 版本兼容性")
 
     async def terminate(self):
         for task in (self._poller, self._picker_job):

@@ -21,6 +21,8 @@ class Outcome:
 
     status: ok | help | not_bound | mention_not_bound | candidates | not_found | error | bound | unbound
     | hidden | newbie | quota | tracking | idle | nomatch | noship
+    picker: ok | invalid | disabled | cooldown | not_bound | no_owned | no_history | hidden
+    | stats_unavailable | empty | catalog_busy | error
     """
     status: str
     text: str = ""  # text reply, or the card's text version

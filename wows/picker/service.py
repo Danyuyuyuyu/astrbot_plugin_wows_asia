@@ -97,6 +97,7 @@ class Picker:
 
     # ---- 选船 ----
     async def pick(self, user_key: str | None, text: str, requester: str = "", *, again: str = "选船") -> Outcome:
+        """Text front-end (chat commands): parse conditions, then delegate to pick_request()."""
         if not self.settings.enabled:
             return Outcome("disabled", "随机选船功能已被管理员关闭。")
         try:
@@ -104,6 +105,13 @@ class Picker:
                              max_count=self.settings.max_count)
         except PickError as exc:
             return Outcome("invalid", exc.message)
+        return await self.pick_request(user_key, req, requester, again=again)
+
+    async def pick_request(self, user_key: str | None, req: PickRequest, requester: str = "", *,
+                           again: str = "选船") -> Outcome:
+        """Structured front-end (LLM tool): cooldown + execution, sharing the same pipeline."""
+        if not self.settings.enabled:
+            return Outcome("disabled", "随机选船功能已被管理员关闭。")
         wait = self._cooldown_left(user_key)
         if wait > 0:
             return Outcome("cooldown", f"抽得太快啦，{wait} 秒后再试。")

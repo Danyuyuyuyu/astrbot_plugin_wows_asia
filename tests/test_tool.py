@@ -8,6 +8,7 @@ from wows.app import Outcome
 from wows.commands import Query
 from wows.stats import Stat
 from wows.storage import Record
+from wows.picker import tool as picker_tool
 from wows.tool import ACTIONS, SCHEMA, InvalidArgs, invalid, parse_args, result
 
 
@@ -158,3 +159,73 @@ def test_readme_examples_parse():
     for example in examples:
         command, _, notes = parse_args(json.loads(example))
         assert not notes, example
+    pick_examples = _re.findall(r"`(\{\"pool\".*?\})`", text)
+    assert len(pick_examples) >= 2
+    for example in pick_examples:
+        picker_tool.parse_args(json.loads(example))
+
+
+# ---- dedicated picker tool (wows_pick_ship) ----
+def pick_args(**args):
+    return picker_tool.parse_args(args)
+
+
+def test_pick_tool_arguments_and_defaults():
+    req = pick_args(pool="持有", nations=["日本", "美国"], types=["战列"], categories=["金币"],
+                    tier_min=8, tier_max=10, count=2, exclude=["航母"])
+    assert req.pool == "owned" and req.count == 2
+    f = req.filter
+    assert f.nations == frozenset({"japan", "usa"}) and f.types == frozenset({"Battleship"})
+    assert f.categories == frozenset({"premium"}) and f.exclude_types == frozenset({"AirCarrier"})
+    assert (f.tier_min, f.tier_max) == (8, 10)
+    default = pick_args()
+    assert default.pool == "auto" and default.count == 1
+    assert (default.filter.tier_min, default.filter.tier_max) == (5, 10)
+    assert default.filter.nations == frozenset() and default.filter.types == frozenset()
+    assert pick_args(nations="日本").filter.nations == frozenset({"japan"})  # model quirk tolerance
+    assert pick_args(categories=["超级战舰"]).filter.tier_min is None  # XI outside the default range
+    assert pick_args(tier_min=8).filter.tier_max == 10
+    assert pick_args(tier_max=6).filter.tier_min == 5
+    assert pick_args(exclude=["不要金币", "非航母", "-潜艇"]).filter.exclude_categories == frozenset({"premium"})
+    assert pick_args(exclude=["不要金币", "非航母", "-潜艇"]).filter.exclude_types == frozenset(
+        {"AirCarrier", "Submarine"})
+
+
+@pytest.mark.parametrize("args, hint", [
+    ({"pool": "乱写"}, "pool"),
+    ({"nations": ["火星"]}, "nations"),
+    ({"types": ["乱写"]}, "types"),
+    ({"categories": ["乱写"]}, "categories"),
+    ({"count": 6}, "count"),
+    ({"count": 0}, "count"),
+    ({"tier_min": 12}, "tier_min"),
+    ({"tier_min": 9, "tier_max": 8}, "tier_min 不能大于"),
+    ({"nations": ["日本"], "exclude": ["日本"]}, "既要又不要"),
+    ({"exclude": ["火星"]}, "exclude"),
+    ({"nations": [1]}, "字符串"),
+])
+def test_pick_tool_invalid_arguments(args, hint):
+    with pytest.raises(picker_tool.InvalidArgs, match=hint):
+        picker_tool.parse_args(args)
+
+
+def test_pick_tool_result_contract():
+    data = json.loads(picker_tool.result(Outcome("ok", "🎲 抽到", b"png", "🎲 抽到"), sent=True))
+    assert data == {"status": "ok", "card_sent_to_user": True, "data": "🎲 抽到",
+                    "next": data["next"]}
+    assert "再抽" in data["next"]
+    text = json.loads(picker_tool.result(Outcome("ok", "🎲 抽到"), sent=False))
+    assert text["card_sent_to_user"] is False and text["message"] == "🎲 抽到"
+    assert text["next"].startswith("用户还没看到结果") and "再抽" in text["next"]
+    cooldown = json.loads(picker_tool.result(Outcome("cooldown", "抽得太快啦，4 秒后再试。"), sent=False))
+    assert cooldown["status"] == "cooldown" and "稍等" in cooldown["next"]
+    invalid = json.loads(picker_tool.invalid("types 只能是：驱逐/巡洋"))
+    assert invalid["status"] == "invalid" and "修正" in invalid["next"]
+
+
+def test_pick_tool_schema_matches_parser():
+    props = picker_tool.SCHEMA["properties"]
+    assert props["pool"]["enum"] == list(picker_tool.POOLS)
+    assert props["nations"]["items"]["enum"] == picker_tool.NATIONS
+    assert props["types"]["items"]["enum"] == picker_tool.TYPES
+    assert props["categories"]["items"]["enum"] == picker_tool.CATEGORIES

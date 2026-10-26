@@ -2,7 +2,7 @@
 
 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 战舰世界（WoWS）**亚服**战绩查询与随机选船插件：图片战绩卡、单船战绩、最近战绩（逐场记录）、账号绑定、“这把玩什么船”随机选船，并提供给大模型调用的函数工具。
 
-由 [nonebot-plugin-wows-asia](https://github.com/Danyuyuyuyu/nonebot-plugin-wows-asia) 移植而来，现在独立维护：大模型调用改成了结构化参数，不再和 NoneBot 版同步。0.3.0 起并入了 zhenxun 版 [wows_ship](https://github.com/Danyuyuyuyu/wows_ship) 的随机选船功能，两者共用 application_id、账号绑定、数据库和截图浏览器。
+由 [nonebot-plugin-wows-asia](https://github.com/Danyuyuyuyu/nonebot-plugin-wows-asia) 移植而来，现在独立维护：大模型调用改成了结构化参数（战绩查询 `wows_query` + 随机选船 `wows_pick_ship`），不再和 NoneBot 版同步。0.3.0 起并入了 zhenxun 版 [wows_ship](https://github.com/Danyuyuyuyu/wows_ship) 的随机选船功能，两者共用 application_id、账号绑定、数据库和截图浏览器。
 
 - 只使用 WG 公开 API（`https://api.worldofwarships.asia/wows/`），只需要 `application_id`，不需要玩家密码或 OAuth。
 - 卡片为本地 HTML 模板 + 无头 Chromium 截图，不加载外部网络资源；渲染失败时自动降级为文字。
@@ -35,8 +35,8 @@
 | `render_scale` | `1.5` | 截图倍率（1–3），越大越清晰、图片越大 |
 | `browser_path` | 空 | 使用系统已有 Chromium/Chrome 的可执行文件路径 |
 | `ai_reply` | `点评` | 大模型调用后：`点评`（发卡片并让模型点评）/ `只发卡片` |
-| `tool_on_demand` | 开 | 只在和战绩相关的对话里提供函数工具 |
-| `tool_keywords` | 空 | 按需提供时额外识别的词，空格或逗号分隔 |
+| `tool_on_demand` | 开 | 只在和战绩/选船相关的对话里提供对应的函数工具 |
+| `tool_keywords` | 空 | 按需提供战绩工具时额外识别的词，空格或逗号分隔（选船工具按自己的意图词判断） |
 | `timeout_seconds` | `15` | 单次 API 请求超时 |
 | `cache_seconds` | `60` | 账号数据缓存时间 |
 | `poll_minutes` | `10` | 快照检查间隔（3–720 分钟） |
@@ -140,7 +140,9 @@
 
 ## 大模型函数调用
 
-插件注册了函数工具 **`wows_query`**（可在管理面板 → 函数工具 中启用/停用）。模型不需要拼指令，而是按字段填参数，插件逐项校验后直接执行：
+插件注册了两个函数工具（可在管理面板 → 函数工具 中启用/停用）：**`wows_query`** 查战绩，**`wows_pick_ship`** 随机选船。模型不需要拼指令，而是按字段填参数，插件逐项校验后直接执行。
+
+### 战绩工具 `wows_query`
 
 | 参数 | 写法 |
 | --- | --- |
@@ -157,9 +159,28 @@
 
 - **结果**：查到卡片时插件直接把图片发到聊天里，工具返回 JSON：`status`（ok / not_bound / candidates / noship / nomatch / tracking / hidden / error / invalid 等）、卡片上的数据（数字精确，模型不能识图也没关系）、`options`（候选昵称或建议船名）和 `next`（这种情况下该怎么做，例如候选昵称要先问用户、建议船名可以直接重查一次）。参数填错时返回 `invalid` 和改法，不会猜一个结果去查；被忽略的参数写在 `notes` 里。
 - **回复方式**（配置“大模型调用后的回复方式”）：默认发卡片后让模型简短点评；选“只发卡片”时卡片发出即结束这一轮，少调用一次模型，但模型拿不到数据，之后追问具体数字答不上来。
-- **按需提供**（配置“按需提供函数工具”，默认开）：只有消息看起来和窝窝战绩有关（战绩、船、场次、伤害、打得怎么样、查过的船名等），或同一会话 10 分钟内刚用过时，才把工具交给模型，闲聊时不占 token。常用问法识别不到时，在“额外关键词”里补充或关闭此项。
+- **按需提供**（配置“按需提供函数工具”，默认开）：只有消息看起来和窝窝战绩有关（战绩、船、场次、伤害、打得怎么样、查过的船名等），或同一会话 10 分钟内刚用过时，才把对应工具交给模型，闲聊时不占 token。常用问法识别不到时，在“额外关键词”里补充或关闭此项。
 - 对比多人（“我和张三三谁胜率高”）时模型会分别调用。
 - 需要使用支持函数调用的模型，并在当前会话启用工具调用。
+
+### 选船工具 `wows_pick_ship`
+
+从持有清单 / 玩过的船 / 全库随机抽 1～5 艘，结果直接发选船卡片。只给提问者本人抽，不会修改持有清单，也不查战绩。
+
+| 参数 | 写法 |
+| --- | --- |
+| `pool` | `自动`（默认）/ `我的` / `持有` / `玩过` / `全库`；自动=有绑定优先持有清单，其次玩过的船，最后全库 |
+| `nations` | 国家数组，如 `["日本", "美国"]`；多个是任一，空=不限 |
+| `types` | 舰种数组，如 `["战列", "巡洋"]`；多个是任一，空=不限 |
+| `categories` | 分类数组：`研发` / `金币` / `特种` / `超级战舰` |
+| `tier_min` / `tier_max` | 1～11；不填用配置的默认等级范围（默认 V–X） |
+| `count` | 1～5，默认 1 |
+| `exclude` | 排除项数组：国家/舰种/分类，如 `["金币", "航母"]` |
+
+例：“帮我从我的船里抽一艘日本战列舰” → `{"pool": "持有", "nations": ["日本"], "types": ["战列"]}`；“全库来 3 艘 8-10 级，不要金币” → `{"pool": "全库", "tier_min": 8, "tier_max": 10, "count": 3, "exclude": ["金币"]}`。
+
+- **结果**：和战绩工具同一套 JSON：`status`（ok / invalid / disabled / cooldown / not_bound / no_owned / no_history / hidden / stats_unavailable / empty / catalog_busy / error）、`card_sent_to_user`、`data` 或 `message`、`next`。
+- **按需提供**：只在这条消息看起来像选船（选船、挑船、抽船、随机船、来一艘、推荐船等），或同一会话 10 分钟内刚用过选船工具时提供；和战绩工具分别判断。
 
 ## 卡片内容
 

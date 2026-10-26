@@ -9,7 +9,7 @@ import pytest
 from wows.app import WowsApp
 from wows.commands import parse_command
 from wows.picker import names_source
-from wows.picker.models import PickError, Ship, ShipFilter
+from wows.picker.models import PickError, PickRequest, Ship, ShipFilter
 from wows.picker.parser import parse_pick
 from wows.picker.randomizer import candidates, in_category, pick
 from wows.picker.service import Picker, PickerSettings
@@ -149,6 +149,18 @@ async def test_pick_unbound_uses_catalog_and_renders_card(tmp_path):
     assert any(c[0] == "image" and "large/PJSB018" in c[1] for c in fake.calls)
     out = await picker.pick("qq:1", "")
     assert out.status == "cooldown"
+    await app.api.close()
+
+
+async def test_pick_request_structured_bypasses_text_parser(tmp_path):
+    picker, app, fake, _ = make(tmp_path, settings=PickerSettings(cooldown=0))
+    req = PickRequest(pool="catalog",
+                      filter=ShipFilter(nations=frozenset({"japan"}), types=frozenset({"Battleship"}),
+                                        tier_min=8, tier_max=10), count=1)
+    out = await picker.pick_request("qq:1", req, "小明")
+    assert out.status == "ok" and "为 小明 抽到" in out.text and "亚服全库" in out.text
+    out = await app.pick_request("qq:1", req, "小明")
+    assert out.status == "ok" and out.image is None  # app was built without a renderer
     await app.api.close()
 
 

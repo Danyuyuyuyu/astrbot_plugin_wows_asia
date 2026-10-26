@@ -1,6 +1,7 @@
 """AstrBot entry point: loaded the way AstrBot loads plugins (<plugin dir>.main), driven with real event types."""
 import importlib
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ main = importlib.import_module(f"{ROOT.name}.main")
 core = importlib.import_module(f"{ROOT.name}.wows.app")
 Tracker = importlib.import_module(f"{ROOT.name}.wows.tracker").Tracker
 commands = importlib.import_module(f"{ROOT.name}.wows.commands")
+picker_tool = importlib.import_module(f"{ROOT.name}.wows.picker.tool")
 
 from .fakes import Clock, FakeWG  # noqa: E402
 
@@ -216,6 +218,11 @@ def test_schema_converts_for_providers():
     gemini = json.dumps(tools.google_schema(), ensure_ascii=False)
     assert "单船" in gemini and "nth" in gemini
 
+    pick_tools = ToolSet([llm_tools.get_func(picker_tool.NAME)])
+    pick_openai = pick_tools.openai_schema()[0]["function"]
+    assert pick_openai["parameters"]["properties"]["types"]["items"]["enum"][2] == "战列"
+    assert pick_tools.anthropic_schema()[0]["input_schema"]["properties"]["count"]["maximum"] == 5
+
 
 def test_picker_settings_from_config():
     s = main._picker_settings({"ship_picker": {"enabled": False, "cooldown_seconds": -5, "tier_min": 9,
@@ -258,3 +265,60 @@ def test_pick_command_registered():
 
     names = {h.handler_name for h in star_handlers_registry}
     assert "pick_ship" in names and "wows" in names
+
+
+def test_pick_tool_registered_with_schema():
+    tool = llm_tools.get_func(picker_tool.NAME)
+    assert tool is not None and tool.description == picker_tool.DESCRIPTION
+    assert tool.parameters["properties"]["nations"]["type"] == "array"
+    size = len(tool.description) + len(json.dumps(tool.parameters, ensure_ascii=False))
+    assert size <= 1200, size  # only offered for pick intents, must stay compact
+
+
+async def test_pick_tool_offered_on_demand():
+    from astrbot.core.agent.tool import ToolSet
+    from astrbot.core.provider.entities import ProviderRequest
+
+    plugin, fake = make_plugin()
+    stats = llm_tools.get_func(main.wows_tool.NAME)
+    pick = llm_tools.get_func(picker_tool.NAME)
+
+    async def offered(text):
+        req = ProviderRequest(prompt=text, func_tool=ToolSet([stats, pick]))
+        await plugin._offer_tool(Event(text), req)
+        return (req.func_tool.get_tool(stats.name) is not None,
+                req.func_tool.get_tool(pick.name) is not None)
+
+    try:
+        assert await offered("帮我选艘日本战列舰") == (False, True)
+        assert await offered("我昨天打得怎么样") == (True, False)
+        assert await offered("帮我选艘船，再看看我昨天的战绩") == (True, True)
+        plugin._tool_used[(Event("x").unified_msg_origin, picker_tool.NAME)] = time.monotonic()
+        assert (await offered("好的"))[1] is True  # follow-up after a pick keeps the pick tool
+        plugin.on_demand = False
+        assert await offered("今天中午吃什么") == (True, True)
+    finally:
+        await plugin.terminate()
+
+
+async def test_llm_tool_picks_ship(tmp_path):
+    plugin, fake = make_plugin()
+    picker_mod = importlib.import_module(f"{ROOT.name}.wows.picker.service")
+    names_mod = importlib.import_module(f"{ROOT.name}.wows.ship_names")
+    plugin.picker = picker_mod.Picker(plugin.api, plugin.storage, StaticRenderer(), data_dir=tmp_path,
+                                      names=names_mod.ShipNameMap(),
+                                      settings=picker_mod.PickerSettings(cooldown=0))
+    plugin.app.picker = plugin.picker
+    try:
+        ev = Event("帮我抽一艘日本战列舰")
+        data = tool_json(await plugin.wows_pick_ship(
+            ev, pool="全库", nations=["日本"], types=["战列"], tier_min=8, tier_max=10))
+        assert data["status"] == "ok" and data["card_sent_to_user"] is True
+        assert "抽到" in data["data"] and "tester" in data["data"] and len(ev.sent) == 1
+        bad = tool_json(await plugin.wows_pick_ship(Event("x"), types=["乱写"]))
+        assert bad["status"] == "invalid" and "修正" in bad["next"]
+        plugin.picker.settings.enabled = False
+        disabled = tool_json(await plugin.wows_pick_ship(Event("x"), pool="全库"))
+        assert disabled["status"] == "disabled" and "没有开启" in disabled["message"]
+    finally:
+        await plugin.terminate()

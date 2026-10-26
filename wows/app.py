@@ -86,6 +86,21 @@ class WowsApp:
             return Outcome("forbidden", "船库更新 / 船库校验 只有管理员可以使用。")
         return await self.picker.admin(cmd.text)
 
+    async def pick_request(self, user_key: str | None, request, requester: str = "") -> Outcome:
+        """Structured picker entry used by the LLM tool: same pipeline as the /选船 command."""
+        if self.picker is None or not self.picker.settings.enabled:
+            return Outcome("disabled", "随机选船功能没有开启。")
+        try:
+            return await self.picker.pick_request(user_key, request, requester)
+        except WowsError as exc:
+            if self.logger:
+                self.logger.warning(f"WoWS pick failed: {type(exc).__name__}")
+            return Outcome("error", str(exc))
+        except Exception as exc:
+            if self.logger:
+                self.logger.error(f"WoWS pick failed unexpectedly: {type(exc).__name__}")
+            return Outcome("error", "选船遇到内部错误，请稍后再试。")
+
     async def _output(self, card: Card) -> Outcome:
         out = Outcome(card.status, card.text, caption=card.caption or card.text, options=list(card.options))
         if self.renderer is None:
